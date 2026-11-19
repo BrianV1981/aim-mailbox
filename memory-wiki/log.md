@@ -1,1 +1,9 @@
-# aim-mailbox — Memory Wiki Log
+# Memory Log
+
+## [2026-11-19] ingest | Bootstrap `aim-mailbox` Architecture, OSS Audit & Windows 11 Harness Matrix
+- Initialized `aim-mailbox` J.O.S.H.U.A. workspace (`v1.1.3` clean scaffold) and synthesized full architectural research into `memory-wiki/`.
+- Created `pages/vision-and-positioning.md`: documented the Windows 11 `tmux` boundary, One-Way GUI Diode, zero-LLM router philosophy, and ecosystem positioning (`aim-mailbox` superseding `aim-chalkboard` while keeping UI cockpits in `aim-connect`/`aim-office`).
+- Created `pages/open-source-landscape.md`: audited `@juanjofuchs/agent-mail`, `mcp_agent_mail` / `mcp_agent_mail_rust` (daemon bloat + non-OSI license rider), `AgentWorkforce/relay` (`relay.sock` + PTY daemon), and Gas Town `gt mail`.
+- Created `pages/maildir-and-dispatcher-architecture.md`: specified the lock-free atomic JSON Maildir storage model across Windows NTFS and WSL2 `/mnt/c` (`9P`), envelope & `agents.json` schemas, and zero-token cron/Task-Scheduler `pulse` guardrails.
+- Created `pages/windows-11-and-cross-os-drivers.md`: documented deterministic session-targeting mechanics across Antigravity Desktop Sidecars (`agentapi send-message` via `language_server.exe`, empirically proven E2E from WSL2 into a minimized Windows 11 Desktop session with zero app restart), `agy` CLI (`--conversation <uuid> -p` + `conversation_summaries.db` idle check), OpenCode `serve` HTTP API, VS Code `v1.145+` (`code chat` & `code agent`), Grok Build (`--resume`), Codex `app-server` JSON-RPC, POSIX `tmux`, and optional Lars vision fallback for closed GUIs.
+- Created `pages/aim-communicate-v2-migration.md`: documented the single-skill `aim-communicate` `v2.0` upgrade path in `aim-skill-library` (resolving `#17` and `#19` while preserving Operator permission and `max_hops` loop gates).
