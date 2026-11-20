@@ -1,5 +1,9 @@
 # Memory Log
 
+## [2026-11-20] ingest | Shipped `aim-communicate` `v2.0` (`aim-skill-library#24`, `#19`) & Symlink-Safe `v0.1.1` Launcher (`#2`)
+- Merged `BrianV1981/aim-skill-library#25` (closing `#24` and `#19`), upgrading `skills/aim-communicate/SKILL.md` to `v2.0` backed by `aim-mailbox`, removing the divergent `vessels/agy/skills/aim-communicate` override, hardening `tmux_send.sh` to `Enter`-only submit with pre-submit composer verification and `-S -300` deep capture (`16/16` `test_skill_compat.py` tests passing), and syncing active vessel symlinks.
+- Shipped `aim-mailbox` `v0.1.1` (`#2`), adding portable relative/absolute symlink-chain resolution in `bin/aim-mail` so `~/.local/bin/aim-mail` symlinks resolve `REPO_ROOT` cleanly across Linux, WSL2, and macOS, backed by an E2E symlink regression test.
+
 ## [2026-11-19] ingest | Shipped `aim-mailbox` `v0.1.0` Core Engine, 8 Wake Drivers, CLI & Dual-OS CI (`#1`)
 - Published `BrianV1981/aim-mailbox` (`MIT`) and linked GitHub Project `#15` (`@BrianV1981's aim-mailbox`).
 - Implemented `src/aim_mailbox/` (`store.py`, `drivers.py`, `dispatcher.py`, `cli.py`) in pure Python 3.10+ stdlib (`0` runtime pip dependencies) with 13 CLI subcommands (`register`, `agents`, `send`, `inbox`, `read`, `reply`, `ack`, `check`, `wait`, `pulse`, `watch`, `install-agy-sidecar`, `describe`) and cross-platform launchers (`bin/aim-mail`, `bin/aim-mail.ps1`, `bin/aim-mail.cmd`).
