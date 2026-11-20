@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'fix/*'
+      - 'feature/*'
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package and pytest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+
+      - name: Verify zero-install shims & CLI (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          ./bin/aim-mail --version
+          ./bin/aim-mail describe
+          aim-mail --help
+
+      - name: Verify zero-install shims & CLI (Windows PowerShell & CMD)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          .\bin\aim-mail.ps1 --version
+          .\bin\aim-mail.ps1 describe
+          cmd /c "bin\aim-mail.cmd --version"
+          aim-mail --help
+
+      - name: Run Pytest Suite
+        run: |
+          python -m pytest tests/ -v -W error::DeprecationWarning

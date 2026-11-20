@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -m aim_mailbox "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python -m aim_mailbox "$@"
+else
+    echo "[ERROR] python3 (3.10+) is required on PATH." >&2
+    exit 1
+fi
