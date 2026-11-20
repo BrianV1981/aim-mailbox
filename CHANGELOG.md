@@ -2,6 +2,11 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.1.1] - 2026-11-20
+
+### Fixed
+- **Symlink-Safe POSIX Launcher (`bin/aim-mail`, `#2`):** Resolved relative and absolute symlink chains (`~/.local/bin/aim-mail -> .../bin/aim-mail`) portably across Linux, WSL2, and macOS before computing `REPO_ROOT`, and added an E2E symlink invocation regression test.
+
 ## [0.1.0] - 2026-11-19
 
 ### Added

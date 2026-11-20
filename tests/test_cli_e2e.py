@@ -178,12 +178,12 @@ def test_unmocked_cli_end_to_end_workflow(tmp_path: Path) -> None:
     assert r_bad.returncode == 1
 
 
-def test_zero_install_launcher_shims() -> None:
+def test_zero_install_launcher_shims(tmp_path: Path) -> None:
     if os.name == "nt":
         cmd_shim = REPO_ROOT / "bin" / "aim-mail.cmd"
         res = subprocess.run(
             ["cmd.exe", "/c", str(cmd_shim), "--version"],
-            cwd=str(REPO_ROOT),
+            cwd=str(tmp_path),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -195,7 +195,7 @@ def test_zero_install_launcher_shims() -> None:
         sh_shim = REPO_ROOT / "bin" / "aim-mail"
         res = subprocess.run(
             ["bash", str(sh_shim), "--version"],
-            cwd=str(REPO_ROOT),
+            cwd=str(tmp_path),
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
@@ -203,6 +203,22 @@ def test_zero_install_launcher_shims() -> None:
         )
         assert res.returncode == 0
         assert aim_mailbox.__version__ in res.stdout
+
+        # Regression (#2): invoking via an external symlink (e.g. ~/.local/bin/aim-mail) must resolve REPO_ROOT
+        ext_bin = tmp_path / "local_bin"
+        ext_bin.mkdir()
+        sym = ext_bin / "aim-mail"
+        sym.symlink_to(sh_shim)
+        res_sym = subprocess.run(
+            [str(sym), "--version"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert res_sym.returncode == 0
+        assert aim_mailbox.__version__ in res_sym.stdout
 
 
 def test_no_hardcoded_host_paths_in_repo() -> None:

@@ -6,7 +6,7 @@
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](pyproject.toml)
 [![A.I.M. Ecosystem](https://img.shields.io/badge/A.I.M.-Ecosystem-00d4ff.svg)](https://github.com/BrianV1981/aim-ecosystem)
 
-`aim-mailbox` (`v0.1.0`) lets local AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across different harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex, VS Code, and `tmux`**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` background database daemons, and `0` idle LLM tokens)**.
+`aim-mailbox` (`v0.1.1`) lets local AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across different harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex, VS Code, and `tmux`**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` background database daemons, and `0` idle LLM tokens)**.
 
 ---
 
