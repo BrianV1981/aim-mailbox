@@ -4,6 +4,7 @@ import base64
 import http.client
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -27,32 +28,45 @@ DRIVER_NAMES = (
     "tmux",
     "command",
 )
+ASYNC_WAKE_DRIVERS = frozenset({"agy-desktop-sidecar", "tmux", "vscode-chat", "command"})
 
 
 def build_wake_prompt(agent_id: str, envelopes: list[dict[str, Any]], mailbox_dir: Path) -> str:
     safe_agent = validate_agent_id(agent_id)
-    safe_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes[:5]]
+    safe_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
     safe_senders = sorted({validate_agent_id(str(e.get("from") or "unknown")) for e in envelopes})
     ids = ", ".join(safe_ids)
     senders = ", ".join(safe_senders)
     count = len(envelopes)
     return (
-        f"[AIM-MAILBOX WAKEUP] Agent '{safe_agent}' has {count} unread message(s) "
+        f"[AIM-MAILBOX WAKEUP] Agent '{safe_agent}' has {count} pending message(s) "
         f"from {senders} (id: {ids}). "
-        f"Run `aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent}`, "
+        f"Run `aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent} --state active`, "
         f"read each message (`aim-mail read {safe_agent} <id>`), complete authorized tasks, "
         f"and acknowledge (`aim-mail reply` or `aim-mail ack {safe_agent} <id>`)."
     )
 
 
-def build_tmux_doorbell(agent_id: str, envelope: dict[str, Any], mailbox_dir: Path) -> str:
+def build_tmux_doorbell(
+    agent_id: str,
+    envelope_or_envelopes: dict[str, Any] | list[dict[str, Any]],
+    mailbox_dir: Path,
+) -> str:
     safe_agent = validate_agent_id(agent_id)
-    msg_id = validate_message_id(str(envelope["id"]), allow_json_ext=False)
-    sender = validate_agent_id(str(envelope.get("from") or "peer"))
-    reply_to = validate_agent_id(str(envelope.get("reply_to") or sender))
+    envelopes = envelope_or_envelopes if isinstance(envelope_or_envelopes, list) else [envelope_or_envelopes]
+    safe_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
+    senders = sorted({validate_agent_id(str(e.get("from") or "peer")) for e in envelopes})
+    if len(envelopes) == 1:
+        msg_id = safe_ids[0]
+        sender = senders[0]
+        reply_to = validate_agent_id(str(envelopes[0].get("reply_to") or sender))
+        return (
+            f"[AIM-MAIL from:{sender} reply_to:{reply_to} id:{msg_id}] "
+            f"Pending mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" read {safe_agent} {msg_id}"
+        )
     return (
-        f"[AIM-MAIL from:{sender} reply_to:{reply_to} id:{msg_id}] "
-        f"Unread mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" read {safe_agent} {msg_id}"
+        f"[AIM-MAIL ({len(envelopes)} msgs) from:{','.join(senders)} ids:{','.join(safe_ids)}] "
+        f"Pending mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent} --state active"
     )
 
 
@@ -454,14 +468,15 @@ def _dispatch_wake_inner(
     if driver == "tmux":
         tmux_bin = agent_cfg.get("binary") or shutil.which("tmux") or "tmux"
         target_session = str(agent_cfg.get("tmux_session") or agent_id).strip()
-        doorbell = build_tmux_doorbell(agent_id, envelopes[0], mailbox_dir)
-        msg_id = str(envelopes[0]["id"])
-        buf_name = f"aim_mail_{msg_id[-12:]}"
+        exact_target = target_session if target_session.startswith("=") else f"={target_session}"
+        doorbell = build_tmux_doorbell(agent_id, envelopes, mailbox_dir)
+        msg_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
+        buf_name = f"aim_mail_{msg_ids[0][-12:]}"
         plan = [
-            [str(tmux_bin), "has-session", "-t", target_session],
-            [str(tmux_bin), "set-buffer", "-b", buf_name, doorbell],
-            [str(tmux_bin), "paste-buffer", "-b", buf_name, "-d", "-p", "-t", target_session],
-            [str(tmux_bin), "send-keys", "-t", target_session, "Enter"],
+            [str(tmux_bin), "has-session", "-t", exact_target],
+            [str(tmux_bin), "set-buffer", "-b", buf_name, "--", doorbell],
+            [str(tmux_bin), "paste-buffer", "-b", buf_name, "-d", "-p", "-t", exact_target],
+            [str(tmux_bin), "send-keys", "-t", exact_target, "Enter"],
         ]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": plan[-1], "doorbell": doorbell, "delivered_at": utc_iso()}
@@ -483,20 +498,35 @@ def _dispatch_wake_inner(
         sub = subprocess.run(plan[3], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         time.sleep(0.4)
         cap = subprocess.run(
-            [str(tmux_bin), "capture-pane", "-t", target_session, "-p", "-J", "-S", "-120"],
+            [str(tmux_bin), "capture-pane", "-t", exact_target, "-p", "-J", "-S", "-120"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=10,
         )
-        verified = (sub.returncode == 0) and (msg_id in cap.stdout)
+        cap_lines = [ln for ln in (cap.stdout or "").splitlines() if ln.strip()]
+        last_line = cap_lines[-1] if cap_lines else ""
+        unsubmitted_composer = bool(re.match(r"^\s*(?:[>❯$#%➜]|\[?input\]?:?)\s+.*\[AIM-MAIL\b", last_line))
+        verified = (
+            (sub.returncode == 0)
+            and all(mid in cap.stdout for mid in msg_ids)
+            and not unsubmitted_composer
+        )
         return {
             "status": "DELIVERED" if verified else "FAILED",
             "driver": driver,
             "command": plan[3],
             "returncode": 0 if verified else 2,
             "stdout": cap.stdout[-600:] if cap.stdout else "",
-            "stderr": "" if verified else "VERIFY_FAIL: message ID needle not found in target tmux pane capture.",
+            "stderr": (
+                ""
+                if verified
+                else (
+                    "VERIFY_FAIL: doorbell appears unsubmitted in target tmux composer."
+                    if unsubmitted_composer
+                    else "VERIFY_FAIL: message ID needle(s) not found in target tmux pane capture."
+                )
+            ),
             "delivered_at": utc_iso(),
         }
 
@@ -510,10 +540,13 @@ def _dispatch_wake_inner(
             "stderr": f"Agent '{agent_id}' with driver 'command' requires a non-empty command list (--command-json).",
             "delivered_at": utc_iso(),
         }
-    first_id = str(envelopes[0]["id"])
+    all_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
+    first_id = all_ids[0]
+    joined_ids = ",".join(all_ids)
     fmt_vars = {
         "agent": agent_id,
         "message_id": first_id,
+        "message_ids": joined_ids,
         "session_id": session_id or "",
         "mailbox_dir": str(mailbox_dir),
         "prompt": prompt,
@@ -533,6 +566,8 @@ def _dispatch_wake_inner(
             "AIM_MAILBOX_DIR": str(mailbox_dir),
             "AIM_MAIL_AGENT": agent_id,
             "AIM_MAIL_MESSAGE_ID": first_id,
+            "AIM_MAIL_MESSAGE_IDS": joined_ids,
+            "AIM_MAIL_MESSAGE_COUNT": str(len(all_ids)),
             "AIM_MAIL_SESSION_ID": session_id or "",
             "AIM_MAIL_WAKE_PROMPT": prompt,
         }

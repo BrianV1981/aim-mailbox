@@ -4,7 +4,7 @@ import sys
 import time
 from typing import Any
 
-from .drivers import dispatch_wake
+from .drivers import ASYNC_WAKE_DRIVERS, dispatch_wake
 from .store import MailboxStore, validate_agent_id
 
 
@@ -110,12 +110,17 @@ def pulse_mailbox(
                         store.register_agent(aid, session_id=str(new_sid))
                     for c_env in claimed:
                         # Re-check whether the woken CLI turn already ACKed or quarantined during execution
-                        current = store.read_message(aid, str(c_env["id"]))
+                        current = store.read_message(aid, str(c_env["id"]), auto_ack_no_ack_required=False)
                         cur_state = current.get("state")
                         if cur_state == "done":
                             store.ack_message(aid, str(c_env["id"]), delivery=res)
                         elif cur_state != "dead":
-                            store.record_wake_delivery(aid, str(c_env["id"]), res)
+                            store.record_wake_delivery(
+                                aid,
+                                str(c_env["id"]),
+                                res,
+                                auto_complete_if_no_ack=(driver not in ASYNC_WAKE_DRIVERS),
+                            )
                     summary["dispatched"].append(
                         {
                             "agent_id": aid,

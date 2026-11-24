@@ -552,10 +552,14 @@ class MailboxStore:
         aid = validate_agent_id(agent_id)
         if state == "all":
             states: tuple[str, ...] = BOX_STATES
+        elif state == "active":
+            states = ("unread", "claimed")
         elif state in BOX_STATES:
             states = (state,)
         else:
-            raise MailboxError(f"Unsupported inbox state {state!r}; choose from {', '.join((*BOX_STATES, 'all'))}.")
+            raise MailboxError(
+                f"Unsupported inbox state {state!r}; choose from {', '.join((*BOX_STATES, 'active', 'all'))}."
+            )
 
         box = self.boxes_dir / aid
         if not box.is_dir():
@@ -588,7 +592,8 @@ class MailboxStore:
             raise MailboxError(f"No mailbox found for agent '{aid}'.")
 
         if msg_id_or_prefix is None:
-            for st in ("unread", "claimed", *states):
+            active_states = tuple(st for st in ("unread", "claimed") if st in states)
+            for st in active_states:
                 st_dir = box / st
                 if not st_dir.is_dir():
                     continue
@@ -596,7 +601,7 @@ class MailboxStore:
                 if files:
                     data = self._load_envelope_file(files[0], st_dir)
                     return st, files[0], data
-            raise MailboxError(f"No messages found for agent '{aid}'.")
+            raise MailboxError(f"No unread or claimed messages pending for agent '{aid}'.")
 
         needle = validate_message_id(msg_id_or_prefix, allow_json_ext=True)
 
@@ -778,6 +783,7 @@ class MailboxStore:
         *,
         claim: bool = False,
         ack: bool = False,
+        auto_ack_no_ack_required: bool = True,
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
         st, _, data = self._find_envelope(aid, msg_id_or_prefix)
@@ -789,6 +795,8 @@ class MailboxStore:
             if claimed is not None:
                 return claimed
             st, _, data = self._find_envelope(aid, msg_id)
+        if auto_ack_no_ack_required and not claim and st in ("unread", "claimed") and not data.get("ack_required", True):
+            return self.ack_message(aid, msg_id, note="Auto-acknowledged on read (ack_required=false)")
         out = dict(data)
         out["state"] = st
         return out

@@ -340,3 +340,29 @@ def test_thread_hop_propagation_over_hop_rejection_dead_parent_and_wait_watch_ra
     assert claimed["id"] == req2["id"]
     assert claimed["state"] == "claimed"
     assert all(m["id"] != req2["id"] for m in store.list_inbox("lead", state="unread"))
+
+
+def test_idless_read_does_not_replay_done_or_crash_on_dead(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+    m1 = store.send_envelope(from_agent="a", to_agent="b", body="completed task")
+    store.ack_message("b", m1["id"])
+    assert len(store.list_inbox("b", state="done")) == 1
+    assert store.list_inbox("b", state="active") == []
+
+    # ID-less read must NOT replay historical done/ envelopes
+    with pytest.raises(MailboxError, match="No unread or claimed messages pending"):
+        store.read_message("b")
+
+    # Even with only dead/ messages present, ID-less read --ack raises a clean MailboxError
+    m2 = store.send_envelope(from_agent="a", to_agent="b", body="dead task")
+    store.quarantine_message("b", m2["id"], reason="DEAD")
+    with pytest.raises(MailboxError, match="No unread or claimed messages pending"):
+        store.read_message("b", ack=True)
+
+    # Async reply (ack_required=False) stays readable in unread/claimed until read
+    rep = store.send_envelope(from_agent="b", to_agent="a", body="async reply", ack_required=False)
+    store.claim_envelope("a", rep["id"])
+    assert [m["id"] for m in store.list_inbox("a", state="active")] == [rep["id"]]
+    read_rep = store.read_message("a")
+    assert read_rep["id"] == rep["id"]
+    assert read_rep["state"] == "done"

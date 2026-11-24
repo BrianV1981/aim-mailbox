@@ -159,10 +159,17 @@ def test_agy_desktop_sidecar_driver_and_installer(tmp_path: Path, monkeypatch: p
     assert len(s_fail["failed"]) == 1
     assert len(store.list_inbox("win-desktop", state="unread")) == 1
 
-    # Inside Sidecar (ANTIGRAVITY_LS_ADDRESS present), succeeds and auto-completes (ack_required=False)
+    # Inside Sidecar (ANTIGRAVITY_LS_ADDRESS present), succeeds and stays readable in claimed/ until read
     monkeypatch.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:55555")
     s_ok = pulse_mailbox(store)
     assert len(s_ok["dispatched"]) == 1
+    assert len(store.list_inbox("win-desktop", state="claimed")) == 1
+    assert len(store.list_inbox("win-desktop", state="active")) == 1
+    assert len(store.list_inbox("win-desktop", state="done")) == 0
+
+    read_msg = store.read_message("win-desktop")
+    assert read_msg["body"] == "ping desktop"
+    assert read_msg["state"] == "done"
     assert len(store.list_inbox("win-desktop", state="done")) == 1
 
     # Verify non-destructive sidecar installer & uninstaller
@@ -392,4 +399,99 @@ def test_pulse_and_watch_isolate_missing_binary_timeout_and_mid_turn_ack_failure
     store.load_agents = boom_load  # type: ignore[method-assign]
     assert watch_mailbox(store, interval=0.1, max_cycles=1) == 0
     store.load_agents = orig_load  # type: ignore[method-assign]
+
+
+def test_woken_active_inbox_multi_message_tmux_command_and_swallowed_enter(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+
+    # 1. Multi-message prompt must NOT truncate IDs at 5 and must instruct --state active
+    envs = [
+        store.send_envelope(from_agent="lead", to_agent="batch-agent", body=f"msg {i}")
+        for i in range(6)
+    ]
+    prompt = build_wake_prompt("batch-agent", envs, store.root)
+    assert "--state active" in prompt
+    for env in envs:
+        assert env["id"] in prompt
+
+    # 2. Multi-message tmux wake includes exact '=<session>', 'set-buffer --', and ALL IDs
+    calls_log = tmp_path / "tmux_multi.jsonl"
+    fake_tmux = _make_fake_cli(
+        tmp_path,
+        "fake_tmux_multi",
+        (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            f"log_p = Path({str(calls_log)!r})\n"
+            "args = sys.argv[1:]\n"
+            "with log_p.open('a', encoding='utf-8') as f:\n"
+            "    f.write(json.dumps(args) + '\\n')\n"
+            "if args and args[0] == 'capture-pane':\n"
+            "    for line in log_p.read_text(encoding='utf-8').splitlines():\n"
+            "        row = json.loads(line)\n"
+            "        if row and row[0] == 'set-buffer':\n"
+            "            print(row[-1])\n"
+        ),
+    )
+    store.register_agent("tmux-batch", driver="tmux", binary=str(fake_tmux), tmux_session="dev-pane")
+    tm1 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="first")
+    time.sleep(0.01)
+    tm2 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="second")
+
+    s_tmux = pulse_mailbox(store, agent_id="tmux-batch")
+    assert len(s_tmux["dispatched"]) == 1
+    logged = [json.loads(ln) for ln in calls_log.read_text(encoding="utf-8").splitlines()]
+    assert any(c[:3] == ["has-session", "-t", "=dev-pane"] for c in logged)
+    set_buf = next(c for c in logged if c[0] == "set-buffer")
+    assert "--" in set_buf
+    assert tm1["id"] in set_buf[-1] and tm2["id"] in set_buf[-1]
+    assert len(store.list_inbox("tmux-batch", state="active")) == 2
+
+    # 3. Unsubmitted composer line in capture-pane fails verification cleanly
+    swallowed_tmux = _make_fake_cli(
+        tmp_path,
+        "swallowed_tmux",
+        (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            f"log_p = Path({str(tmp_path / 'swallow.jsonl')!r})\n"
+            "args = sys.argv[1:]\n"
+            "with log_p.open('a', encoding='utf-8') as f:\n"
+            "    f.write(json.dumps(args) + '\\n')\n"
+            "if args and args[0] == 'capture-pane':\n"
+            "    for line in log_p.read_text(encoding='utf-8').splitlines():\n"
+            "        row = json.loads(line)\n"
+            "        if row and row[0] == 'set-buffer':\n"
+            "            print('❯ ' + row[-1])\n"
+        ),
+    )
+    store.register_agent("tmux-swallow", driver="tmux", binary=str(swallowed_tmux), tmux_session="swallow")
+    store.send_envelope(from_agent="lead", to_agent="tmux-swallow", body="swallow check")
+    s_swallow = pulse_mailbox(store, agent_id="tmux-swallow")
+    assert len(s_swallow["failed"]) == 1
+    assert "unsubmitted" in s_swallow["failed"][0]["error"]
+
+    # 4. Multi-message command wake exposes {message_ids}, AIM_MAIL_MESSAGE_IDS, and AIM_MAIL_MESSAGE_COUNT
+    cmd_out = tmp_path / "cmd_batch.json"
+    store.register_agent(
+        "cmd-batch",
+        driver="command",
+        command=[
+            sys.executable,
+            "-c",
+            (
+                "import json, os, sys; from pathlib import Path; "
+                f"Path({str(cmd_out)!r}).write_text(json.dumps({{'arg': sys.argv[1], 'ids': os.environ['AIM_MAIL_MESSAGE_IDS'], 'count': os.environ['AIM_MAIL_MESSAGE_COUNT']}}))"
+            ),
+            "{message_ids}",
+        ],
+    )
+    cm1 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="one")
+    time.sleep(0.01)
+    cm2 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="two")
+    s_cmd = pulse_mailbox(store, agent_id="cmd-batch")
+    assert len(s_cmd["dispatched"]) == 1
+    batch_data = json.loads(cmd_out.read_text(encoding="utf-8"))
+    expected_ids = f"{cm1['id']},{cm2['id']}"
+    assert batch_data == {"arg": expected_ids, "ids": expected_ids, "count": "2"}
 

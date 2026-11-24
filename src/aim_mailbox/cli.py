@@ -381,7 +381,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_inbox = sub.add_parser("inbox", parents=[common], help="List envelopes in an agent's mailbox")
     p_inbox.add_argument("agent", help="Target agent ID")
-    p_inbox.add_argument("--state", choices=(*BOX_STATES, "all"), default="unread", help="Envelope state filter")
+    p_inbox.add_argument("--state", choices=(*BOX_STATES, "active", "all"), default="unread", help="Envelope state filter")
     p_inbox.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_read = sub.add_parser("read", parents=[common], help="Read a specific or oldest unread envelope")
