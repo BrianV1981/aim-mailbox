@@ -442,7 +442,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sidecar.add_argument("--uninstall", action="store_true", help="Remove sidecar directory and config entry")
     p_sidecar.add_argument("--json", action="store_true", help="Emit JSON output")
 
-    sub.add_parser("describe", parents=[common], help="Print compact JSON schema of CLI commands and drivers")
+    p_desc = sub.add_parser("describe", parents=[common], help="Print compact JSON schema of CLI commands and drivers")
+    p_desc.add_argument("--json", action="store_true", help="Emit JSON output (always JSON)")
     return parser
 
 

@@ -58,7 +58,7 @@ Using a **Maildir JSON layout** eliminates shared file locks completely:
 
 ### Logical Address Book (`agents.json`)
 Maps human/agent-friendly logical names (`aim-joshua`, `aim-auditor`, `copy-cat`) to their host environment and last-mile wake driver (see [Windows 11 & Cross-OS Drivers](windows-11-and-cross-os-drivers.md)):
-- `driver`: `"agy-desktop-sidecar"` | `"agy-cli"` | `"opencode-http"` | `"grok-cli"` | `"codex-rpc"` | `"vscode-chat"` | `"tmux"` | `"lars-vision"`
+- `driver`: `"none"` | `"agy-desktop-sidecar"` | `"agy-cli"` | `"opencode-http"` | `"grok-cli"` | `"codex-cli"` | `"vscode-chat"` | `"tmux"` | `"command"`
 - `cwd`: Target project workspace root
 - `session_id`: Pinned conversation/session UUID (updated automatically on first headless run or during `/aim-handoff` session rotation)
 - `tmux_session` / `http_url`: Optional driver-specific endpoint metadata

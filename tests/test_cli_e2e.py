@@ -49,11 +49,15 @@ def test_unmocked_cli_end_to_end_workflow(tmp_path: Path) -> None:
     mb = str(tmp_path / "mb")
     hook_out = tmp_path / "hook_ran.json"
 
-    # 1. describe
+    # 1. describe (both plain and --json)
     r_desc = _run_cli("describe")
     assert r_desc.returncode == 0
     desc = json.loads(r_desc.stdout)
     assert "agy-desktop-sidecar" in desc["drivers"]
+
+    r_desc_json = _run_cli("describe", "--json")
+    assert r_desc_json.returncode == 0
+    assert json.loads(r_desc_json.stdout) == desc
 
     # 2. register (supporting --mailbox-dir both before and after subcommand)
     cmd_spec = json.dumps(

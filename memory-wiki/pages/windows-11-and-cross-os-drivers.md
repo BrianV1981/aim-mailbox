@@ -12,11 +12,12 @@ While [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md
 | **Antigravity Desktop / IDE** | `agy-desktop-sidecar` | Win11, macOS, Linux | Exact `conversation_id` via Sidecar `agentapi send-message` | **No** *(works minimized)* |
 | **Antigravity CLI (`agy`)** | `agy-cli` | Win11, WSL2, macOS, Linux | Exact `conversation_id` via `agy --conversation <uuid> -p` | **No** (`0` idle RAM) |
 | **OpenCode Desktop + CLI** | `opencode-http` | Win11, WSL2, macOS, Linux | `POST http://127.0.0.1:4096/session/<id>/message` | **No** |
-| **VS Code (`v1.145+`)** | `vscode-chat` / `vscode-agent` | Win11, macOS, Linux | `code chat -m agent -r` or `code agent endpoints` JSON | **No** |
+| **VS Code (`v1.145+`)** | `vscode-chat` | Win11, macOS, Linux | `code chat -m agent -r` | **No** |
 | **Grok Build (`grok`)** | `grok-cli` | Win11, WSL2, macOS, Linux | Named ID in `~/.grok/sessions` via `grok --resume <id> -p` | **No** (`0` idle RAM) |
-| **Codex App-Server / CLI** | `codex-rpc` | Win11, WSL2, macOS, Linux | JSON-RPC 2.0 `thread/resume` + `turn/start` (`threadId`) | **No** |
+| **Codex CLI (`codex`)** | `codex-cli` | Win11, WSL2, macOS, Linux | `codex exec resume <id> <prompt>` (or `codex exec <prompt>`) | **No** |
 | **Live Interactive TUI (`tmux`)** | `tmux` | WSL2, Linux, macOS | `tmux` session name + 1-line `paste-buffer` + `Enter` | **No** |
-| **Closed Desktop GUIs** (`Cursor`, `Windsurf`, `Codex` Store GUI) | `lars-vision` | Win11, Linux Desktop | Pinned `[MAIL:<agent>]` sidebar title + header check | **Yes** *(Lars + Win32 UIA)* |
+| **Closed Desktop GUIs / Custom Hooks** (`Cursor`, `Windsurf`, `Codex` Store GUI) | `command` | Win11, Linux Desktop | Custom JSON argv template (`--command-json`, e.g., Lars + Win32 UIA) | **Yes** *(optional)* |
+| **Passive Inbox** | `none` | Win11, WSL2, macOS, Linux | Manual `inbox`/`read` or `check --inject` turn hooks | **No** |
 
 ---
 
@@ -46,7 +47,7 @@ While [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md
 - OpenCode's Desktop app and TUI share a local background server (`opencode serve --port 4096 --hostname 127.0.0.1`, optional basic auth via `OPENCODE_SERVER_USERNAME` / `OPENCODE_SERVER_PASSWORD`).
 - Create sessions via `POST /session` and inject prompts into an exact live session via `POST http://127.0.0.1:4096/session/<session_id>/message` — updating both GUI and CLI clients in real time.
 
-### D. VS Code `v1.145+` (`vscode-chat` / `vscode-agent`)
+### D. VS Code `v1.145+` (`vscode-chat`)
 - Verified on Windows 11 (`Microsoft VS Code\bin\code.cmd`):
   - `code.exe chat -m agent -r "<prompt>"` (`--reuse-window`) routes a prompt directly into Agent Mode inside an active window.
   - `code-tunnel.exe agent` (`host`, `ps`, `endpoints`, `logs`, `stop`) publishes live machine-readable JSON agent-host endpoints under `<user-data-dir>/agent-host/local-endpoint/entries/`.
@@ -58,11 +59,11 @@ While [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md
   grok --resume <session-id> --cwd <project_dir> --no-auto-update --output-format json -p "Check aim-mail inbox"
   ```
 
-### F. OpenAI Codex (`codex-rpc` vs. Windows Store GUI)
+### F. OpenAI Codex (`codex-cli` vs. Windows Store GUI)
 - **Headless / Server (`codex app-server --listen stdio://`):** Full JSON-RPC 2.0 control (`thread/resume` + `turn/start` targeting an exact `threadId`).
 - **Windows Store Desktop GUI (`Codex.app`):** Retains an exclusive writer lock on open GUI threads (`"thread <id> already has an active writer"`), blocking external RPC attachment while open in the GUI sidebar.
 
-### G. Cursor, Windsurf & The Optional `lars-vision` GUI Fallback
+### G. Cursor, Windsurf & The Optional `command` (Lars GUI Vision) Fallback
 - **Cursor Headless CLI:** `cursor-agent -p "<prompt>" --workspace <path> --output-format json` (`irm 'https://cursor.com/install?win32=true' | iex`) supports headless runs.
 - **Closed Desktop GUI Panels (`Cursor` Composer, `Windsurf` Cascade, `Codex` Store GUI):** Expose no external CLI/URI/HTTP endpoint to inject into an already-open sidebar chat. For persistent visible GUI sessions on these editors, the optional **Lars local vision + Win32 UIA driver** enforces a 4-gate safety sequence:
   1. Tag mail-enabled GUI chats with a unique sidebar prefix (`[MAIL:<agent>]`).

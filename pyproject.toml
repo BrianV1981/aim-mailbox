@@ -41,3 +41,6 @@ Issues = "https://github.com/BrianV1981/aim-mailbox/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
