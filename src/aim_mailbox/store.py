@@ -286,13 +286,14 @@ class MailboxStore:
                     fh.write("\n")
                 _chmod_safe(lock_path, 0o600)
                 return lock_path, token
-            except FileExistsError:
+            except (FileExistsError, PermissionError):
                 try:
-                    existing = json.loads(_read_text_with_retry(lock_path))
-                    if utc_now() >= parse_utc_iso(existing["expires_at"]):
-                        stale_tok = str(existing.get("token") or "")
-                        if stale_tok:
-                            self._reclaim_stale_lock(lock_path, "_agents", stale_tok)
+                    if lock_path.exists():
+                        existing = json.loads(_read_text_with_retry(lock_path))
+                        if utc_now() >= parse_utc_iso(existing["expires_at"]):
+                            stale_tok = str(existing.get("token") or "")
+                            if stale_tok:
+                                self._reclaim_stale_lock(lock_path, "_agents", stale_tok)
                 except (OSError, KeyError, ValueError, json.JSONDecodeError):
                     try:
                         if lock_path.exists() and (time.time() - lock_path.stat().st_mtime) > 10.0:
@@ -433,7 +434,7 @@ class MailboxStore:
             "expires_at": utc_iso(expires),
         }
 
-        for _ in range(2):
+        for _ in range(4):
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
@@ -441,6 +442,9 @@ class MailboxStore:
                     fh.write("\n")
                 _chmod_safe(lock_path, 0o600)
                 return token
+            except PermissionError:
+                time.sleep(0.02)
+                continue
             except FileExistsError:
                 try:
                     existing = json.loads(_read_text_with_retry(lock_path))

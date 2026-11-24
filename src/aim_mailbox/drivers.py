@@ -221,6 +221,28 @@ def _coerce_output_text(val: Any) -> str:
     return str(val)
 
 
+def _run_capture(
+    cmd: list[str],
+    *,
+    cwd: Any = None,
+    env: dict[str, str] | None = None,
+    timeout: float = 300.0,
+    check: bool = False,
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        cmd,
+        cwd=cwd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=check,
+        timeout=timeout,
+    )
+
+
 def _extract_codex_session_id(raw: str) -> str | None:
     for line in (raw or "").splitlines():
         line = line.strip()
@@ -343,14 +365,7 @@ def _dispatch_wake_inner(
                 ),
                 "delivered_at": utc_iso(),
             }
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
@@ -379,14 +394,7 @@ def _dispatch_wake_inner(
         cmd.extend(["-p", prompt])
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
         parsed = _extract_json_dict(res.stdout) or {}
         discovered_sid = str(parsed.get("conversation_id") or session_id or "").strip() or None
         return {
@@ -498,14 +506,7 @@ def _dispatch_wake_inner(
         cmd.extend(["-p", prompt])
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
@@ -525,14 +526,7 @@ def _dispatch_wake_inner(
             cmd = [str(codex_bin), "exec", "--json", "--add-dir", str(mailbox_dir), prompt]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
         discovered_sid = _extract_codex_session_id(res.stdout) or session_id
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
@@ -550,14 +544,7 @@ def _dispatch_wake_inner(
         cmd = [str(code_bin), "chat", "-m", "agent", "-r", prompt]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = subprocess.run(
-            cmd,
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
+        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
@@ -586,7 +573,7 @@ def _dispatch_wake_inner(
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": plan[-1], "doorbell": doorbell, "delivered_at": utc_iso()}
 
-        chk = subprocess.run(plan[0], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        chk = _run_capture(plan[0], timeout=10)
         if chk.returncode != 0:
             return {
                 "status": "FAILED",
@@ -596,25 +583,23 @@ def _dispatch_wake_inner(
                 "stderr": chk.stderr or f"tmux session '{target_session}' not found.",
                 "delivered_at": utc_iso(),
             }
-        subprocess.run(plan[1], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=10)
-        subprocess.run(plan[2], stdin=subprocess.DEVNULL, capture_output=True, text=True, check=True, timeout=10)
+        _run_capture(plan[1], check=True, timeout=10)
+        _run_capture(plan[2], check=True, timeout=10)
         time.sleep(0.15)
         # Submit with Enter ONLY (never Escape, preventing multi-line/paste wipe on AGY & Grok)
-        sub = subprocess.run(plan[3], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
+        sub = _run_capture(plan[3], timeout=10)
         time.sleep(0.4)
-        cap = subprocess.run(
+        cap = _run_capture(
             [str(tmux_bin), "capture-pane", "-t", pane_target, "-p", "-J", "-S", "-120"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
             timeout=10,
         )
-        cap_lines = [ln for ln in (cap.stdout or "").splitlines() if ln.strip()]
+        cap_out = cap.stdout or ""
+        cap_lines = [ln for ln in cap_out.splitlines() if ln.strip()]
         last_line = cap_lines[-1] if cap_lines else ""
         unsubmitted_composer = bool(re.match(r"^\s*(?:[>❯$#%➜]|\[?input\]?:?)\s+.*\[AIM-MAIL\b", last_line))
         verified = (
             (sub.returncode == 0)
-            and all(mid in cap.stdout for mid in msg_ids)
+            and all(mid in cap_out for mid in msg_ids)
             and not unsubmitted_composer
         )
         return {
@@ -622,7 +607,7 @@ def _dispatch_wake_inner(
             "driver": driver,
             "command": plan[3],
             "returncode": 0 if verified else 2,
-            "stdout": cap.stdout[-600:] if cap.stdout else "",
+            "stdout": cap_out[-600:] if cap_out else "",
             "stderr": (
                 ""
                 if verified
@@ -677,15 +662,7 @@ def _dispatch_wake_inner(
             "AIM_MAIL_WAKE_PROMPT": prompt,
         }
     )
-    res = subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-    )
+    res = _run_capture(cmd, cwd=cwd, env=env, timeout=timeout)
     return {
         "status": "DELIVERED" if res.returncode == 0 else "FAILED",
         "driver": driver,
