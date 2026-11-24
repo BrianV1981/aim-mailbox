@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import http.client
 import json
 import os
 import shutil
@@ -143,6 +144,14 @@ def _extract_json_dict(raw: str) -> dict[str, Any] | None:
     return None
 
 
+def _coerce_output_text(val: Any) -> str:
+    if val is None:
+        return ""
+    if isinstance(val, bytes):
+        return val.decode("utf-8", errors="replace")
+    return str(val)
+
+
 def dispatch_wake(
     agent_cfg: dict[str, Any],
     envelopes: list[dict[str, Any]],
@@ -154,6 +163,58 @@ def dispatch_wake(
     driver = str(agent_cfg.get("driver") or "none").strip()
     if driver not in DRIVER_NAMES:
         raise MailboxError(f"Unsupported driver {driver!r}; valid drivers: {', '.join(DRIVER_NAMES)}.")
+
+    try:
+        return _dispatch_wake_inner(
+            agent_cfg,
+            envelopes,
+            driver=driver,
+            mailbox_dir=mailbox_dir,
+            dry_run=dry_run,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        cmd = exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)]
+        return {
+            "status": "FAILED",
+            "driver": driver,
+            "command": [str(x) for x in cmd],
+            "returncode": 124,
+            "stdout": _coerce_output_text(exc.stdout),
+            "stderr": _coerce_output_text(exc.stderr) or f"Driver '{driver}' timed out after {timeout}s.",
+            "delivered_at": utc_iso(),
+        }
+    except subprocess.CalledProcessError as exc:
+        cmd = exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)]
+        return {
+            "status": "FAILED",
+            "driver": driver,
+            "command": [str(x) for x in cmd],
+            "returncode": exc.returncode or 1,
+            "stdout": _coerce_output_text(exc.stdout),
+            "stderr": _coerce_output_text(exc.stderr) or str(exc),
+            "delivered_at": utc_iso(),
+        }
+    except (OSError, subprocess.SubprocessError, http.client.HTTPException) as exc:
+        return {
+            "status": "FAILED",
+            "driver": driver,
+            "returncode": 1,
+            "stdout": "",
+            "stderr": f"{type(exc).__name__}: {exc}",
+            "delivered_at": utc_iso(),
+        }
+
+
+def _dispatch_wake_inner(
+    agent_cfg: dict[str, Any],
+    envelopes: list[dict[str, Any]],
+    *,
+    driver: str,
+    mailbox_dir: Path,
+    dry_run: bool = False,
+    timeout: float = 300.0,
+) -> dict[str, Any]:
 
     agent_id = str(agent_cfg["agent_id"])
     prompt = build_wake_prompt(agent_id, envelopes, mailbox_dir)

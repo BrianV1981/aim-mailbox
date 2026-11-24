@@ -6,13 +6,14 @@ import os
 import sqlite3
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from aim_mailbox.dispatcher import pulse_mailbox
+from aim_mailbox.dispatcher import pulse_mailbox, watch_mailbox
 from aim_mailbox.drivers import build_tmux_doorbell, build_wake_prompt, install_agy_sidecar, uninstall_agy_sidecar
 from aim_mailbox.store import MailboxError, MailboxStore
 
@@ -322,4 +323,73 @@ def test_pulse_scales_agent_lock_ttl_with_timeout(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr(store, "acquire_agent_lock", spy_acquire)
     pulse_mailbox(store, timeout=900.0)
     assert seen_ttls == [960.0]
+
+
+def test_pulse_and_watch_isolate_missing_binary_timeout_and_mid_turn_ack_failure(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+
+    # Agent 1 (alphabetically first): missing binary -> must fail cleanly, release claim, and NOT starve agent 3
+    store.register_agent("alpha-missing", driver="agy-cli", binary=str(tmp_path / "does_not_exist_bin"), cwd=str(tmp_path))
+    m_missing = store.send_envelope(from_agent="lead", to_agent="alpha-missing", body="missing bin")
+
+    # Agent 2: driver times out -> must return structured FAILED receipt and release claim back to unread/
+    slow_cli = _make_fake_cli(tmp_path, "slow_cli", "import time\ntime.sleep(2.0)\n")
+    store.register_agent("beta-timeout", driver="grok-cli", binary=str(slow_cli), cwd=str(tmp_path))
+    m_timeout = store.send_envelope(from_agent="lead", to_agent="beta-timeout", body="timeout me")
+
+    # Agent 3: woken turn ACKs msg[0] mid-turn and then exits 1 (with msg[1] still claimed) -> no MailboxError crash!
+    ack_then_fail = _make_fake_cli(
+        tmp_path,
+        "ack_then_fail",
+        (
+            "import os, sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parent.parent / 'src')!r})\n"
+            "from aim_mailbox.store import MailboxStore\n"
+            "st = MailboxStore(os.environ['AIM_MAILBOX_DIR'])\n"
+            "claimed = st.list_inbox('gamma-midack', state='claimed')\n"
+            "if claimed:\n"
+            "    st.ack_message('gamma-midack', claimed[0]['id'], note='handled first')\n"
+            "sys.exit(1)\n"
+        ),
+    )
+    store.register_agent(
+        "gamma-midack",
+        driver="command",
+        command=[str(ack_then_fail)],
+        cwd=str(tmp_path),
+    )
+    m_mid0 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="first")
+    time.sleep(0.01)
+    m_mid1 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="second")
+
+    # Agent 4 (alphabetically last): healthy agent -> must STILL be dispatched!
+    healthy_marker = tmp_path / "healthy.txt"
+    store.register_agent(
+        "zeta-healthy",
+        driver="command",
+        command=[sys.executable, "-c", f"from pathlib import Path; Path({str(healthy_marker)!r}).write_text('ok')"],
+    )
+    store.send_envelope(from_agent="lead", to_agent="zeta-healthy", body="still run")
+
+    summary = pulse_mailbox(store, timeout=0.2)
+    assert len(summary["failed"]) == 3
+    assert len(summary["dispatched"]) == 1
+    assert summary["dispatched"][0]["agent_id"] == "zeta-healthy"
+    assert healthy_marker.is_file()
+
+    # Claims on failing drivers were returned to unread/, and mid-turn ACK stayed in done/ without resurrection
+    assert [m["id"] for m in store.list_inbox("alpha-missing", state="unread")] == [m_missing["id"]]
+    assert [m["id"] for m in store.list_inbox("beta-timeout", state="unread")] == [m_timeout["id"]]
+    assert [m["id"] for m in store.list_inbox("gamma-midack", state="done")] == [m_mid0["id"]]
+    assert [m["id"] for m in store.list_inbox("gamma-midack", state="unread")] == [m_mid1["id"]]
+    assert store.list_inbox("gamma-midack", state="claimed") == []
+
+    # watch_mailbox must survive cycle exceptions without crashing
+    def boom_load() -> dict[str, Any]:
+        raise RuntimeError("transient watch failure")
+
+    orig_load = store.load_agents
+    store.load_agents = boom_load  # type: ignore[method-assign]
+    assert watch_mailbox(store, interval=0.1, max_cycles=1) == 0
+    store.load_agents = orig_load  # type: ignore[method-assign]
 

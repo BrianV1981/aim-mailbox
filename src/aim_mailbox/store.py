@@ -671,7 +671,18 @@ class MailboxStore:
         aid = validate_agent_id(agent_id)
         clean_id = validate_message_id(msg_id, allow_json_ext=True)
         box = self.ensure_agent_box(aid)
-        _, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread"))
+        st, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread", "done", "dead"))
+        if st in ("done", "dead"):
+            out = dict(data)
+            out["state"] = st
+            return out
+        done_path = box / "done" / f"{data['id']}.json"
+        if done_path.is_file():
+            done_data = self._load_envelope_file(done_path, box / "done")
+            out = dict(done_data)
+            out["state"] = "done"
+            return out
+
         if last_error:
             data["last_error"] = last_error
         if delivery is not None:
@@ -733,11 +744,23 @@ class MailboxStore:
         aid = validate_agent_id(agent_id)
         clean_id = validate_message_id(msg_id, allow_json_ext=True)
         box = self.ensure_agent_box(aid)
-        st, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread", "done"))
+        st, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread", "done", "dead"))
+        if st == "dead":
+            out = dict(data)
+            out["state"] = "dead"
+            return out
+        done_path = box / "done" / f"{data['id']}.json"
+        if st != "done" and done_path.is_file():
+            done_data = self._load_envelope_file(done_path, box / "done")
+            done_data["delivery"] = delivery
+            write_json_atomic(done_path, done_data, tmp_dir=box / "tmp")
+            out = dict(done_data)
+            out["state"] = "done"
+            return out
         data["delivery"] = delivery
         if st == "done" or (auto_complete_if_no_ack and not data.get("ack_required", True)):
             data.setdefault("acked_at", utc_iso())
-            dst = box / "done" / f"{data['id']}.json"
+            dst = done_path
             target_state = "done"
         else:
             dst = box / "claimed" / f"{data['id']}.json"
