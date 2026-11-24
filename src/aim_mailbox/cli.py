@@ -98,6 +98,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         body=args.body,
         refs=args.refs,
         thread_id=args.thread_id,
+        hop_count=args.hop_count,
         max_hops=args.max_hops,
         ack_required=not args.no_ack_required,
         operator_approved=args.operator_approved,
@@ -223,6 +224,7 @@ def cmd_wait(args: argparse.Namespace) -> int:
         thread_id=args.thread_id,
         timeout=args.timeout,
         poll_interval=args.poll_interval,
+        claim=args.claim,
     )
     if msg is None:
         if args.json:
@@ -370,7 +372,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--body", required=True, help="Concise message body")
     p_send.add_argument("--ref", dest="refs", action="append", default=[], help="Referenced file path (repeatable)")
     p_send.add_argument("--thread-id", default=None, help="Optional existing thread ID")
-    p_send.add_argument("--max-hops", type=int, default=1, help="Max automated reply hops on thread (default: 1)")
+    p_send.add_argument("--hop-count", type=int, default=0, help="Initial hop count (default: 0; auto-incremented on known thread_id)")
+    p_send.add_argument("--max-hops", type=int, default=None, help="Max automated reply hops on thread (default: 1 or existing thread max)")
     p_send.add_argument("--no-ack-required", action="store_true", help="Mark message as informational (no ACK needed)")
     p_send.add_argument("--operator-approved", action="store_true", help="Record explicit Operator approval on envelope")
     p_send.add_argument("--wake", action="store_true", help="Immediately trigger a pulse dispatch for recipient")
@@ -416,6 +419,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_wait.add_argument("--thread-id", default=None, help="Optional thread_id filter")
     p_wait.add_argument("--timeout", type=float, default=60.0, help="Timeout in seconds (default: 60)")
     p_wait.add_argument("--poll-interval", type=float, default=0.25, help="Filesystem poll interval in seconds")
+    p_wait.add_argument("--claim", action="store_true", help="Atomically claim matching unread envelope")
     p_wait.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_pulse = sub.add_parser("pulse", parents=[common], help="Single-pass zero-LLM wake sweep for cron / Task Scheduler")

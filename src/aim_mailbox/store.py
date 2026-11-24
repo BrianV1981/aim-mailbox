@@ -446,6 +446,35 @@ class MailboxStore:
     # ------------------------------------------------------------------
     # Envelope Operations
     # ------------------------------------------------------------------
+    def _lookup_thread_bounds(self, thread_id: str) -> tuple[int, int] | None:
+        """Return (max_hop_count, min_max_hops) across existing envelopes for a thread_id, if any."""
+        if not self.boxes_dir.is_dir():
+            return None
+        found = False
+        highest_hop = 0
+        thread_max_hops: int | None = None
+        for box in self.boxes_dir.iterdir():
+            if not box.is_dir():
+                continue
+            for st in BOX_STATES:
+                st_dir = box / st
+                if not st_dir.is_dir():
+                    continue
+                for p in st_dir.glob("*.json"):
+                    try:
+                        data = self._load_envelope_file(p, st_dir)
+                    except (OSError, json.JSONDecodeError, MailboxError):
+                        continue
+                    if data.get("thread_id") != thread_id:
+                        continue
+                    found = True
+                    highest_hop = max(highest_hop, int(data.get("hop_count", 0)))
+                    env_max = int(data.get("max_hops", 1))
+                    thread_max_hops = env_max if thread_max_hops is None else min(thread_max_hops, env_max)
+        if not found or thread_max_hops is None:
+            return None
+        return highest_hop, thread_max_hops
+
     def send_envelope(
         self,
         *,
@@ -458,7 +487,7 @@ class MailboxStore:
         thread_id: str | None = None,
         in_reply_to: str | None = None,
         hop_count: int = 0,
-        max_hops: int = 1,
+        max_hops: int | None = 1,
         ack_required: bool = True,
         operator_approved: bool = False,
         max_attempts: int = 3,
@@ -468,6 +497,19 @@ class MailboxStore:
         reply_target = validate_agent_id(reply_to) if reply_to else sender
         if not isinstance(body, str) or not body.strip():
             raise MailboxError("Message body must be non-empty.")
+
+        effective_hop = int(hop_count)
+        effective_max_hops = 1 if max_hops is None else int(max_hops)
+        if thread_id and in_reply_to is None:
+            bounds = self._lookup_thread_bounds(thread_id)
+            if bounds is not None:
+                highest_hop, thread_max_hops = bounds
+                effective_hop = max(effective_hop, highest_hop + 1)
+                effective_max_hops = thread_max_hops if max_hops is None else min(int(max_hops), thread_max_hops)
+                if effective_hop > effective_max_hops:
+                    raise MailboxError(
+                        f"Thread '{thread_id}' hop limit exceeded ({effective_hop} > {effective_max_hops})."
+                    )
 
         box = self.ensure_agent_box(recipient)
         now = utc_now()
@@ -482,8 +524,8 @@ class MailboxStore:
             "subject": subject.strip(),
             "body": body.strip(),
             "refs": [str(r) for r in (refs or []) if str(r).strip()],
-            "hop_count": int(hop_count),
-            "max_hops": int(max_hops),
+            "hop_count": effective_hop,
+            "max_hops": effective_max_hops,
             "ack_required": bool(ack_required),
             "operator_approved": bool(operator_approved),
             "attempts": 0,
@@ -783,7 +825,28 @@ class MailboxStore:
         ack_required: bool = False,
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
-        _, _, parent = self._find_envelope(aid, msg_id_or_prefix)
+        try:
+            _, _, parent = self._find_envelope(aid, msg_id_or_prefix, states=("unread", "claimed", "done"))
+        except MailboxError:
+            # Give a specific diagnostic if the parent is quarantined in dead/
+            try:
+                st_dead, _, _ = self._find_envelope(aid, msg_id_or_prefix, states=("dead",))
+                if st_dead == "dead":
+                    raise MailboxError(
+                        f"Cannot reply to quarantined dead/ message {msg_id_or_prefix!r}; re-queue it first."
+                    )
+            except MailboxError as dead_exc:
+                if "quarantined dead/" in str(dead_exc):
+                    raise
+            raise
+
+        next_hop = int(parent.get("hop_count", 0)) + 1
+        max_hops = int(parent.get("max_hops", 1))
+        if next_hop > max_hops:
+            raise MailboxError(
+                f"Cannot reply to '{parent['id']}': hop limit exceeded ({next_hop} > {max_hops})."
+            )
+
         parent_sub = str(parent.get("subject", "")).strip()
         if subject is not None:
             reply_sub = subject.strip()
@@ -801,8 +864,8 @@ class MailboxStore:
             refs=refs,
             thread_id=str(parent["thread_id"]),
             in_reply_to=str(parent["id"]),
-            hop_count=int(parent.get("hop_count", 0)) + 1,
-            max_hops=int(parent.get("max_hops", 1)),
+            hop_count=next_hop,
+            max_hops=max_hops,
             ack_required=ack_required,
             operator_approved=True,
         )
@@ -817,15 +880,37 @@ class MailboxStore:
         thread_id: str | None = None,
         timeout: float = 60.0,
         poll_interval: float = 0.25,
+        claim: bool = False,
     ) -> dict[str, Any] | None:
         aid = validate_agent_id(agent_id)
+        started_at = utc_now()
         deadline = time.monotonic() + max(0.0, float(timeout))
         interval = max(0.05, float(poll_interval))
         while True:
             unread = self.list_inbox(aid, state="unread")
             for msg in unread:
                 if thread_id is None or msg.get("thread_id") == thread_id:
+                    if claim:
+                        claimed = self.claim_envelope(aid, str(msg["id"]))
+                        if claimed is not None:
+                            return claimed
+                        continue
                     return msg
+
+            # Also detect envelopes claimed/completed by a concurrent watcher after wait started
+            for post_state in ("claimed", "done"):
+                for msg in self.list_inbox(aid, state=post_state):
+                    if thread_id is not None and msg.get("thread_id") != thread_id:
+                        continue
+                    ts_raw = msg.get("created_at") or msg.get("claimed_at") or msg.get("acked_at")
+                    if not ts_raw:
+                        continue
+                    try:
+                        if parse_utc_iso(str(ts_raw)) >= started_at:
+                            return msg
+                    except ValueError:
+                        continue
+
             if time.monotonic() >= deadline:
                 return None
             time.sleep(min(interval, max(0.01, deadline - time.monotonic())))

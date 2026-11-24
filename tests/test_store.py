@@ -282,3 +282,61 @@ def test_agent_id_normalization_agents_lock_and_atomic_state_transitions(
         t.join(timeout=5.0)
     assert len(winners) == 1
     assert store.release_agent_lock("peer-1", winners[0]) is True
+
+
+def test_thread_hop_propagation_over_hop_rejection_dead_parent_and_wait_watch_race(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+    m0 = store.send_envelope(from_agent="lead", to_agent="worker", body="start", max_hops=1)
+    assert m0["hop_count"] == 0
+
+    # send --thread-id must propagate hop_count and prevent max_hops bypass
+    m1 = store.send_envelope(
+        from_agent="worker",
+        to_agent="lead",
+        body="follow up",
+        thread_id=m0["thread_id"],
+        max_hops=99,
+    )
+    assert m1["hop_count"] == 1
+    assert m1["max_hops"] == 1
+
+    # Third hop on same thread via send --thread-id exceeds max_hops=1 -> rejected
+    with pytest.raises(MailboxError, match="hop limit exceeded"):
+        store.send_envelope(from_agent="lead", to_agent="worker", body="loop", thread_id=m0["thread_id"])
+
+    # reply_message beyond max_hops must reject BEFORE writing into unread/
+    with pytest.raises(MailboxError, match="hop limit exceeded"):
+        store.reply_message("lead", m1["id"], body="reply loop")
+    assert store.list_inbox("worker", state="unread") == [m0]
+
+    # Replying to a quarantined dead/ parent must fail cleanly without sending a reply
+    store.quarantine_message("worker", m0["id"], reason="BAD")
+    before_lead = store.list_inbox("lead", state="all")
+    with pytest.raises(MailboxError, match="dead/"):
+        store.reply_message("worker", m0["id"], body="zombie reply")
+    assert store.list_inbox("lead", state="all") == before_lead
+
+    # wait_for_mail detects post-start claimed/done arrival when watcher claims concurrently
+    # and wait(claim=True) atomically claims unread arrival
+    req = store.send_envelope(from_agent="lead", to_agent="worker", body="async", max_hops=2)
+
+    def watch_claims_after_delay() -> None:
+        time.sleep(0.12)
+        rep = store.reply_message("worker", req["id"], body="fast reply")
+        store.claim_envelope("lead", rep["id"])
+
+    t = threading.Thread(target=watch_claims_after_delay, daemon=True)
+    t.start()
+    arrived = store.wait_for_mail("lead", thread_id=req["thread_id"], timeout=3.0, poll_interval=0.05)
+    t.join(timeout=2.0)
+    assert arrived is not None
+    assert arrived["body"] == "fast reply"
+    assert arrived["state"] == "claimed"
+
+    # wait(claim=True) claims unread arrival directly
+    req2 = store.send_envelope(from_agent="worker", to_agent="lead", body="claim me")
+    claimed = store.wait_for_mail("lead", thread_id=req2["thread_id"], timeout=1.0, claim=True)
+    assert claimed is not None
+    assert claimed["id"] == req2["id"]
+    assert claimed["state"] == "claimed"
+    assert all(m["id"] != req2["id"] for m in store.list_inbox("lead", state="unread"))
