@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
+import stat
 import threading
 import time
 from pathlib import Path
@@ -14,6 +16,7 @@ from aim_mailbox.store import (
     utc_iso,
     utc_now,
     validate_agent_id,
+    validate_message_id,
 )
 
 
@@ -144,3 +147,51 @@ def test_reclaim_expired_claims_and_wait_for_mail(tmp_path: Path) -> None:
     assert arrived["body"] == "done"
 
     assert store.wait_for_mail("nobody", timeout=0.1, poll_interval=0.05) is None
+
+
+def test_message_id_path_traversal_blocked_and_permissions_enforced(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    victim = outside / "victim.json"
+    victim.write_text(json.dumps({"id": "victim", "from": "a", "to": "b", "body": "secret"}), encoding="utf-8")
+
+    store = MailboxStore(tmp_path / "mailbox")
+    sent = store.send_envelope(from_agent="sender", to_agent="worker", body="hello")
+    store.register_agent("worker", driver="none")
+    tok = store.acquire_agent_lock("worker", ttl_seconds=10.0)
+    assert tok is not None
+
+    for bad_id in ("", "../outside/victim", "../../../../outside/victim", r"..\victim", ".hidden", "id\nline"):
+        with pytest.raises(MailboxError):
+            validate_message_id(bad_id)
+        with pytest.raises(MailboxError):
+            store.read_message("worker", bad_id)
+        with pytest.raises(MailboxError):
+            store.ack_message("worker", bad_id)
+        with pytest.raises(MailboxError):
+            store.reply_message("worker", bad_id, body="nope")
+        with pytest.raises(MailboxError):
+            store.claim_envelope("worker", bad_id)
+
+    assert victim.is_file(), "External file must never be unlinked by traversal ack"
+
+    # Malicious on-disk envelope 'id' field must be blocked
+    tampered = store.boxes_dir / "worker" / "unread" / "20261118T000000000000Z_deadbeef.json"
+    tampered.write_text(
+        json.dumps({"id": "../../../../outside/pwned", "from": "sender", "to": "worker", "body": "bad"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(MailboxError):
+        store.ack_message("worker", "20261118T000000000000Z_deadbeef")
+    tampered.unlink()
+
+    if os.name == "posix":
+        assert stat.S_IMODE(store.root.stat().st_mode) == 0o700
+        assert stat.S_IMODE(store.locks_dir.stat().st_mode) == 0o700
+        assert stat.S_IMODE((store.boxes_dir / "worker" / "unread").stat().st_mode) == 0o700
+        assert stat.S_IMODE(store.agents_file.stat().st_mode) == 0o600
+        assert stat.S_IMODE((store.locks_dir / "worker.lock.json").stat().st_mode) == 0o600
+        env_file = store.boxes_dir / "worker" / "unread" / f"{sent['id']}.json"
+        assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
+
+    store.release_agent_lock("worker", tok)

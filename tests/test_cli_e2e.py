@@ -181,6 +181,22 @@ def test_unmocked_cli_end_to_end_workflow(tmp_path: Path) -> None:
     r_bad = _run_cli("inbox", "../bad", "--mailbox-dir", mb)
     assert r_bad.returncode == 1
 
+    outside_dir = tmp_path / "outside_cli"
+    outside_dir.mkdir()
+    victim_json = outside_dir / "victim.json"
+    victim_json.write_text(json.dumps({"id": "victim", "from": "a", "to": "worker-1", "body": "secret"}), encoding="utf-8")
+
+    for cmd in (
+        ("read", "worker-1", "../outside_cli/victim", "--mailbox-dir", mb),
+        ("read", "worker-1", "../outside_cli/victim", "--claim", "--mailbox-dir", mb),
+        ("ack", "worker-1", "../outside_cli/victim", "--mailbox-dir", mb),
+        ("reply", "worker-1", "../outside_cli/victim", "--body", "x", "--mailbox-dir", mb),
+        ("install-agy-sidecar", "--config-dir", str(sc_cfg), "--uninstall", "--sidecar-id", "../outside_cli"),
+    ):
+        res_trav = _run_cli(*cmd)
+        assert res_trav.returncode == 1
+    assert victim_json.is_file()
+
 
 def test_zero_install_launcher_shims(tmp_path: Path) -> None:
     if os.name == "nt":

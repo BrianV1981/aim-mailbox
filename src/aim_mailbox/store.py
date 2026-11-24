@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 AGENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$")
 WINDOWS_RESERVED_NAMES = frozenset(
     {
         "CON",
@@ -62,6 +63,42 @@ def validate_agent_id(raw: str) -> str:
     return cleaned
 
 
+def validate_message_id(raw: str, *, allow_json_ext: bool = True) -> str:
+    """Validate a message ID or lookup prefix, blocking path separators, '..', and control characters."""
+    if not isinstance(raw, str):
+        raise MailboxError("Message ID must be a non-empty string.")
+    cleaned = raw.strip()
+    if allow_json_ext and cleaned.endswith(".json"):
+        cleaned = cleaned[:-5]
+    if not cleaned or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise MailboxError(f"Invalid message ID {raw!r}.")
+    if "/" in cleaned or "\\" in cleaned or ".." in cleaned or cleaned.startswith("."):
+        raise MailboxError(f"Unsafe message ID {raw!r}: path traversal characters are forbidden.")
+    if not MESSAGE_ID_RE.match(cleaned):
+        raise MailboxError(f"Invalid message ID {raw!r}.")
+    return cleaned
+
+
+def _chmod_safe(path: Path, mode: int) -> None:
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
+def _mkdir_private(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _chmod_safe(path, 0o700)
+
+
+def _ensure_within(path: Path, base_dir: Path, label: str = "path") -> Path:
+    resolved_base = base_dir.resolve()
+    resolved_target = path.resolve()
+    if not resolved_target.is_relative_to(resolved_base):
+        raise MailboxError(f"Path traversal blocked for {label}: {path}")
+    return resolved_target
+
+
 def resolve_mailbox_dir(explicit_dir: str | Path | None = None) -> Path:
     if explicit_dir:
         return Path(explicit_dir).expanduser().resolve()
@@ -86,20 +123,23 @@ def _replace_with_retry(src: Path, dst: Path, retries: int = 4, delay: float = 0
 
 
 def write_json_atomic(dst: Path, payload: Any, tmp_dir: Path | None = None) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(dst.parent)
     stage_dir = tmp_dir or dst.parent
-    stage_dir.mkdir(parents=True, exist_ok=True)
+    _mkdir_private(stage_dir)
     tmp_path = stage_dir / f".tmp_{dst.name}_{uuid.uuid4().hex[:8]}"
     encoded = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
     try:
-        with open(tmp_path, "w", encoding="utf-8", newline="\n") as fh:
+        fd = os.open(str(tmp_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(encoded)
             fh.flush()
             try:
                 os.fsync(fh.fileno())
             except OSError:
                 pass
+        _chmod_safe(tmp_path, 0o600)
         _replace_with_retry(tmp_path, dst)
+        _chmod_safe(dst, 0o600)
     except Exception:
         try:
             if tmp_path.exists():
@@ -124,14 +164,18 @@ class MailboxStore:
         self.agents_file = self.root / "agents.json"
 
     def ensure_root(self) -> None:
-        self.boxes_dir.mkdir(parents=True, exist_ok=True)
-        self.locks_dir.mkdir(parents=True, exist_ok=True)
+        _mkdir_private(self.root)
+        _mkdir_private(self.boxes_dir)
+        _mkdir_private(self.locks_dir)
 
     def ensure_agent_box(self, agent_id: str) -> Path:
+        self.ensure_root()
         aid = validate_agent_id(agent_id)
         box = self.boxes_dir / aid
+        _ensure_within(box, self.boxes_dir, "agent box")
+        _mkdir_private(box)
         for sub in ("tmp", *BOX_STATES):
-            (box / sub).mkdir(parents=True, exist_ok=True)
+            _mkdir_private(box / sub)
         return box
 
     # ------------------------------------------------------------------
@@ -221,10 +265,11 @@ class MailboxStore:
 
         for _ in range(2):
             try:
-                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
                 with os.fdopen(fd, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh, indent=2)
                     fh.write("\n")
+                _chmod_safe(lock_path, 0o600)
                 return token
             except FileExistsError:
                 try:
@@ -309,6 +354,17 @@ class MailboxStore:
         out["state"] = "unread"
         return out
 
+    def _load_envelope_file(self, path: Path, state_dir: Path) -> dict[str, Any]:
+        _ensure_within(path, state_dir, "envelope")
+        canonical_id = validate_message_id(path.stem, allow_json_ext=False)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise MailboxError(f"Invalid envelope format in {path.name}: expected JSON object.")
+        if "id" in data and data["id"] is not None:
+            validate_message_id(str(data["id"]), allow_json_ext=False)
+        data["id"] = canonical_id
+        return data
+
     def list_inbox(self, agent_id: str, state: str = "unread") -> list[dict[str, Any]]:
         aid = validate_agent_id(agent_id)
         if state == "all":
@@ -329,10 +385,10 @@ class MailboxStore:
                 continue
             for p in sorted(st_dir.glob("*.json")):
                 try:
-                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data = self._load_envelope_file(p, st_dir)
                     data["state"] = st
                     results.append(data)
-                except (OSError, json.JSONDecodeError):
+                except (OSError, json.JSONDecodeError, MailboxError):
                     continue
         results.sort(key=lambda d: str(d.get("id", "")))
         return results
@@ -348,55 +404,56 @@ class MailboxStore:
         if not box.is_dir():
             raise MailboxError(f"No mailbox found for agent '{aid}'.")
 
-        if not msg_id_or_prefix:
+        if msg_id_or_prefix is None:
             for st in ("unread", "claimed", *states):
                 st_dir = box / st
                 if not st_dir.is_dir():
                     continue
                 files = sorted(st_dir.glob("*.json"))
                 if files:
-                    data = json.loads(files[0].read_text(encoding="utf-8"))
+                    data = self._load_envelope_file(files[0], st_dir)
                     return st, files[0], data
             raise MailboxError(f"No messages found for agent '{aid}'.")
 
-        needle = msg_id_or_prefix.strip()
-        if needle.endswith(".json"):
-            needle = needle[:-5]
+        needle = validate_message_id(msg_id_or_prefix, allow_json_ext=True)
 
-        matches: list[tuple[str, Path]] = []
+        matches: list[tuple[str, Path, Path]] = []
         for st in states:
             st_dir = box / st
             if not st_dir.is_dir():
                 continue
             exact = st_dir / f"{needle}.json"
             if exact.is_file():
-                data = json.loads(exact.read_text(encoding="utf-8"))
+                data = self._load_envelope_file(exact, st_dir)
                 return st, exact, data
             for cand in sorted(st_dir.glob("*.json")):
                 if cand.stem.startswith(needle) or cand.stem.endswith(needle):
-                    matches.append((st, cand))
+                    matches.append((st, st_dir, cand))
 
         if not matches:
             raise MailboxError(f"Message {msg_id_or_prefix!r} not found for agent '{aid}'.")
         if len(matches) > 1:
-            ids = ", ".join(p.stem for _, p in matches[:5])
+            ids = ", ".join(p.stem for _, _, p in matches[:5])
             raise MailboxError(f"Ambiguous message prefix {msg_id_or_prefix!r} (matches: {ids}).")
-        st, found = matches[0]
-        data = json.loads(found.read_text(encoding="utf-8"))
+        st, st_dir, found = matches[0]
+        data = self._load_envelope_file(found, st_dir)
         return st, found, data
 
     def claim_envelope(self, agent_id: str, msg_id: str) -> dict[str, Any] | None:
         """Atomically claim an unread envelope (unread -> claimed). Returns None if another worker claimed it."""
         aid = validate_agent_id(agent_id)
+        clean_id = validate_message_id(msg_id, allow_json_ext=True)
         box = self.ensure_agent_box(aid)
-        unread_path = box / "unread" / f"{msg_id}.json"
-        claimed_path = box / "claimed" / f"{msg_id}.json"
+        unread_path = box / "unread" / f"{clean_id}.json"
+        claimed_path = box / "claimed" / f"{clean_id}.json"
+        _ensure_within(unread_path, box / "unread", "unread envelope")
+        _ensure_within(claimed_path, box / "claimed", "claimed envelope")
         try:
             _replace_with_retry(unread_path, claimed_path)
         except FileNotFoundError:
             return None
 
-        data = json.loads(claimed_path.read_text(encoding="utf-8"))
+        data = self._load_envelope_file(claimed_path, box / "claimed")
         data["attempts"] = int(data.get("attempts", 0)) + 1
         data["claimed_at"] = utc_iso()
         write_json_atomic(claimed_path, data, tmp_dir=box / "tmp")
@@ -415,8 +472,9 @@ class MailboxStore:
     ) -> dict[str, Any]:
         """Return a claimed envelope to unread/ for retry, or quarantine to dead/ if max_attempts reached."""
         aid = validate_agent_id(agent_id)
+        clean_id = validate_message_id(msg_id, allow_json_ext=True)
         box = self.ensure_agent_box(aid)
-        _, path, data = self._find_envelope(aid, msg_id, states=("claimed", "unread"))
+        _, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread"))
         if last_error:
             data["last_error"] = last_error
         if delivery is not None:
@@ -436,6 +494,8 @@ class MailboxStore:
             dst = box / "unread" / f"{data['id']}.json"
             target_state = "unread"
 
+        _ensure_within(dst, box / target_state, "destination envelope")
+        _ensure_within(path, box, "source envelope")
         write_json_atomic(dst, data, tmp_dir=box / "tmp")
         if path != dst and path.exists():
             try:
@@ -456,7 +516,7 @@ class MailboxStore:
         now = utc_now()
         for p in sorted(claimed_dir.glob("*.json")):
             try:
-                data = json.loads(p.read_text(encoding="utf-8"))
+                data = self._load_envelope_file(p, claimed_dir)
                 claimed_at = parse_utc_iso(data["claimed_at"]) if data.get("claimed_at") else None
                 expired = (
                     (now - claimed_at).total_seconds() >= lease_seconds
@@ -466,7 +526,7 @@ class MailboxStore:
                 if expired:
                     self.release_claim(aid, data["id"], last_error="CLAIM_LEASE_EXPIRED")
                     reclaimed.append(str(data["id"]))
-            except (OSError, KeyError, ValueError, json.JSONDecodeError):
+            except (OSError, KeyError, ValueError, json.JSONDecodeError, MailboxError):
                 continue
         return reclaimed
 
@@ -480,8 +540,9 @@ class MailboxStore:
     ) -> dict[str, Any]:
         """Persist wake delivery receipt on a claimed message (moving to done/ if ack_required is False)."""
         aid = validate_agent_id(agent_id)
+        clean_id = validate_message_id(msg_id, allow_json_ext=True)
         box = self.ensure_agent_box(aid)
-        st, path, data = self._find_envelope(aid, msg_id, states=("claimed", "unread", "done"))
+        st, path, data = self._find_envelope(aid, clean_id, states=("claimed", "unread", "done"))
         data["delivery"] = delivery
         if st == "done" or (auto_complete_if_no_ack and not data.get("ack_required", True)):
             data.setdefault("acked_at", utc_iso())
@@ -491,6 +552,8 @@ class MailboxStore:
             dst = box / "claimed" / f"{data['id']}.json"
             target_state = "claimed"
 
+        _ensure_within(dst, box / target_state, "destination envelope")
+        _ensure_within(path, box, "source envelope")
         write_json_atomic(dst, data, tmp_dir=box / "tmp")
         if path != dst and path.exists():
             try:
@@ -540,6 +603,8 @@ class MailboxStore:
         if delivery is not None:
             data["delivery"] = delivery
         dst = box / "done" / f"{data['id']}.json"
+        _ensure_within(dst, box / "done", "destination envelope")
+        _ensure_within(path, box, "source envelope")
         write_json_atomic(dst, data, tmp_dir=box / "tmp")
         if st != "done" and path != dst and path.exists():
             try:
@@ -566,6 +631,8 @@ class MailboxStore:
         if delivery is not None:
             data["delivery"] = delivery
         dst = box / "dead" / f"{data['id']}.json"
+        _ensure_within(dst, box / "dead", "destination envelope")
+        _ensure_within(path, box, "source envelope")
         write_json_atomic(dst, data, tmp_dir=box / "tmp")
         if st != "dead" and path != dst and path.exists():
             try:

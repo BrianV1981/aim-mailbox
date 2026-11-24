@@ -13,8 +13,8 @@ from typing import Any
 import pytest
 
 from aim_mailbox.dispatcher import pulse_mailbox
-from aim_mailbox.drivers import install_agy_sidecar, uninstall_agy_sidecar
-from aim_mailbox.store import MailboxStore
+from aim_mailbox.drivers import build_tmux_doorbell, build_wake_prompt, install_agy_sidecar, uninstall_agy_sidecar
+from aim_mailbox.store import MailboxError, MailboxStore
 
 
 def _make_fake_cli(tmp_path: Path, name: str, py_body: str) -> Path:
@@ -280,4 +280,28 @@ def test_tmux_driver_sends_enter_only_never_escape(tmp_path: Path) -> None:
     assert len(set_buf_calls) == 1
     assert "\n" not in set_buf_calls[0][-1]
     assert sent["id"] in set_buf_calls[0][-1]
+
+
+def test_sidecar_traversal_and_prompt_field_validation_blocked(tmp_path: Path) -> None:
+    cfg_dir = tmp_path / "gemini_config"
+    plugins_dir = cfg_dir / "plugins"
+    plugins_dir.mkdir(parents=True)
+    sentinel = plugins_dir / "keep.txt"
+    sentinel.write_text("do not delete", encoding="utf-8")
+
+    mb = tmp_path / "mailbox"
+    for bad_sidecar in ("../plugins", "../../outside", "a/b", r"a\b"):
+        with pytest.raises(MailboxError):
+            install_agy_sidecar(mb, config_dir=cfg_dir, sidecar_id=bad_sidecar)
+        with pytest.raises(MailboxError):
+            uninstall_agy_sidecar(config_dir=cfg_dir, sidecar_id=bad_sidecar)
+
+    assert sentinel.is_file()
+
+    with pytest.raises(MailboxError):
+        build_wake_prompt("worker", [{"id": "bad\nid", "from": "sender"}], mb)
+    with pytest.raises(MailboxError):
+        build_wake_prompt("worker", [{"id": "20261118T000000Z_12345678", "from": "bad\nfrom"}], mb)
+    with pytest.raises(MailboxError):
+        build_tmux_doorbell("worker", {"id": "20261118T000000Z_12345678", "from": "sender", "reply_to": "../bad"}, mb)
 

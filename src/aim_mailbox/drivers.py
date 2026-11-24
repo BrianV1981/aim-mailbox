@@ -13,7 +13,7 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .store import MailboxError, utc_iso, write_json_atomic
+from .store import MailboxError, utc_iso, validate_agent_id, validate_message_id, write_json_atomic
 
 DRIVER_NAMES = (
     "none",
@@ -29,25 +29,29 @@ DRIVER_NAMES = (
 
 
 def build_wake_prompt(agent_id: str, envelopes: list[dict[str, Any]], mailbox_dir: Path) -> str:
-    ids = ", ".join(str(e["id"]) for e in envelopes[:5])
-    senders = ", ".join(sorted({str(e.get("from", "unknown")) for e in envelopes}))
+    safe_agent = validate_agent_id(agent_id)
+    safe_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes[:5]]
+    safe_senders = sorted({validate_agent_id(str(e.get("from") or "unknown")) for e in envelopes})
+    ids = ", ".join(safe_ids)
+    senders = ", ".join(safe_senders)
     count = len(envelopes)
     return (
-        f"[AIM-MAILBOX WAKEUP] Agent '{agent_id}' has {count} unread message(s) "
+        f"[AIM-MAILBOX WAKEUP] Agent '{safe_agent}' has {count} unread message(s) "
         f"from {senders} (id: {ids}). "
-        f"Run `aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {agent_id}`, "
-        f"read each message (`aim-mail read {agent_id} <id>`), complete authorized tasks, "
-        f"and acknowledge (`aim-mail reply` or `aim-mail ack {agent_id} <id>`)."
+        f"Run `aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent}`, "
+        f"read each message (`aim-mail read {safe_agent} <id>`), complete authorized tasks, "
+        f"and acknowledge (`aim-mail reply` or `aim-mail ack {safe_agent} <id>`)."
     )
 
 
 def build_tmux_doorbell(agent_id: str, envelope: dict[str, Any], mailbox_dir: Path) -> str:
-    msg_id = str(envelope["id"])
-    sender = str(envelope.get("from", "peer"))
-    reply_to = str(envelope.get("reply_to") or sender)
+    safe_agent = validate_agent_id(agent_id)
+    msg_id = validate_message_id(str(envelope["id"]), allow_json_ext=False)
+    sender = validate_agent_id(str(envelope.get("from") or "peer"))
+    reply_to = validate_agent_id(str(envelope.get("reply_to") or sender))
     return (
         f"[AIM-MAIL from:{sender} reply_to:{reply_to} id:{msg_id}] "
-        f"Unread mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" read {agent_id} {msg_id}"
+        f"Unread mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" read {safe_agent} {msg_id}"
     )
 
 
@@ -502,8 +506,12 @@ def install_agy_sidecar(
 ) -> dict[str, Any]:
     """Install and enable an Antigravity Desktop Sidecar running `aim-mail watch` non-destructively."""
     cfg_root = (config_dir or (Path.home() / ".gemini" / "config")).expanduser().resolve()
-    sidecar_dir = cfg_root / "sidecars" / sidecar_id
-    sidecar_dir.mkdir(parents=True, exist_ok=True)
+    clean_sidecar_id = validate_agent_id(sidecar_id)
+    sidecars_root = (cfg_root / "sidecars").resolve()
+    sidecar_dir = (sidecars_root / clean_sidecar_id).resolve()
+    if not sidecar_dir.is_relative_to(sidecars_root) or sidecar_dir == sidecars_root:
+        raise MailboxError(f"Unsafe sidecar_id {sidecar_id!r}: escapes sidecars directory.")
+    sidecar_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     py_bin = python_exe or sys.executable
     pkg_src_root = str(Path(__file__).resolve().parent.parent)
@@ -549,7 +557,7 @@ def install_agy_sidecar(
 
     return {
         "installed": True,
-        "sidecar_id": sidecar_id,
+        "sidecar_id": clean_sidecar_id,
         "sidecar_dir": str(sidecar_dir),
         "config_json": str(config_json_path),
         "mailbox_dir": str(mailbox_dir),
@@ -563,15 +571,19 @@ def uninstall_agy_sidecar(
     sidecar_id: str = "aim-mailbox",
 ) -> dict[str, Any]:
     cfg_root = (config_dir or (Path.home() / ".gemini" / "config")).expanduser().resolve()
-    sidecar_dir = cfg_root / "sidecars" / sidecar_id
+    clean_sidecar_id = validate_agent_id(sidecar_id)
+    sidecars_root = (cfg_root / "sidecars").resolve()
+    sidecar_dir = (sidecars_root / clean_sidecar_id).resolve()
+    if not sidecar_dir.is_relative_to(sidecars_root) or sidecar_dir == sidecars_root:
+        raise MailboxError(f"Unsafe sidecar_id {sidecar_id!r}: escapes sidecars directory.")
     config_json_path = cfg_root / "config.json"
 
     removed_config = False
     if config_json_path.is_file():
         cfg = json.loads(config_json_path.read_text(encoding="utf-8"))
         sidecars_map = cfg.get("sidecars")
-        if isinstance(sidecars_map, dict) and sidecar_id in sidecars_map:
-            del sidecars_map[sidecar_id]
+        if isinstance(sidecars_map, dict) and clean_sidecar_id in sidecars_map:
+            del sidecars_map[clean_sidecar_id]
             write_json_atomic(config_json_path, cfg)
             removed_config = True
 
@@ -582,7 +594,7 @@ def uninstall_agy_sidecar(
 
     return {
         "uninstalled": removed_config or removed_dir,
-        "sidecar_id": sidecar_id,
+        "sidecar_id": clean_sidecar_id,
         "removed_config": removed_config,
         "removed_dir": removed_dir,
     }
