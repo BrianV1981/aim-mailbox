@@ -67,8 +67,21 @@ def pulse_mailbox(
                     summary["quarantined"].append(
                         {"agent_id": aid, "message_id": env["id"], "reason": "MAX_HOPS_EXCEEDED"}
                     )
-                else:
-                    valid_unread.append(env)
+                    continue
+
+                is_initial = hop_count == 0 and env.get("in_reply_to") is None
+                approved = bool(env.get("operator_approved", False)) or bool(cfg.get("allow_unapproved", False))
+                if is_initial and not approved:
+                    summary["deferred"].append(
+                        {
+                            "agent_id": aid,
+                            "message_id": env["id"],
+                            "reason": "OPERATOR_APPROVAL_REQUIRED",
+                        }
+                    )
+                    continue
+
+                valid_unread.append(env)
 
             if not valid_unread:
                 continue

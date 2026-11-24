@@ -368,7 +368,9 @@ def _dispatch_wake_inner(
                 "delivered_at": utc_iso(),
             }
         agy_bin = agent_cfg.get("binary") or shutil.which("agy") or "agy"
-        cmd = [str(agy_bin), "--output-format", "json", "--dangerously-skip-permissions"]
+        cmd = [str(agy_bin), "--output-format", "json"]
+        if agent_cfg.get("dangerously_skip_permissions"):
+            cmd.append("--dangerously-skip-permissions")
         if session_id:
             cmd.extend(["--conversation", session_id])
         cmd.extend(["-p", prompt])

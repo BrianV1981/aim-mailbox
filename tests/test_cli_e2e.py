@@ -198,6 +198,104 @@ def test_unmocked_cli_end_to_end_workflow(tmp_path: Path) -> None:
     assert victim_json.is_file()
 
 
+def test_wake_fails_closed_for_unregistered_passive_and_unapproved_targets(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+
+    # 1. send --wake to unregistered agent exits non-zero (rc=2)
+    r_unreg = _run_cli(
+        "send",
+        "--mailbox-dir",
+        mb,
+        "--from",
+        "lead",
+        "--to",
+        "ghost-agent",
+        "--body",
+        "nobody home",
+        "--operator-approved",
+        "--wake",
+    )
+    assert r_unreg.returncode == 2
+    assert "not registered" in r_unreg.stderr
+
+    # 2. send --wake to driver=none agent exits non-zero (rc=2)
+    assert _run_cli("register", "passive-bot", "--driver", "none", "--mailbox-dir", mb).returncode == 0
+    r_passive = _run_cli(
+        "send",
+        "--mailbox-dir",
+        mb,
+        "--from",
+        "lead",
+        "--to",
+        "passive-bot",
+        "--body",
+        "passive",
+        "--operator-approved",
+        "--wake",
+    )
+    assert r_passive.returncode == 2
+    assert "passive driver 'none'" in r_passive.stderr
+
+    # 3. send --wake without --operator-approved exits non-zero (rc=2) even on active driver
+    cmd_ok = json.dumps([sys.executable, "-c", "print('ok')"])
+    assert (
+        _run_cli(
+            "register",
+            "active-bot",
+            "--driver",
+            "command",
+            "--command-json",
+            cmd_ok,
+            "--mailbox-dir",
+            mb,
+        ).returncode
+        == 0
+    )
+    r_unapproved = _run_cli(
+        "send",
+        "--mailbox-dir",
+        mb,
+        "--from",
+        "peer",
+        "--to",
+        "active-bot",
+        "--body",
+        "no approval",
+        "--wake",
+    )
+    assert r_unapproved.returncode == 2
+    assert "--operator-approved" in r_unapproved.stderr
+
+    # 4. reply --wake to unregistered/passive sender also exits non-zero (rc=2)
+    r_seed = _run_cli(
+        "send",
+        "--mailbox-dir",
+        mb,
+        "--from",
+        "passive-bot",
+        "--to",
+        "active-bot",
+        "--body",
+        "please reply",
+        "--operator-approved",
+        "--json",
+    )
+    assert r_seed.returncode == 0
+    seed_id = json.loads(r_seed.stdout)["id"]
+    r_reply_fail = _run_cli(
+        "reply",
+        "active-bot",
+        seed_id,
+        "--body",
+        "replying to passive",
+        "--wake",
+        "--mailbox-dir",
+        mb,
+    )
+    assert r_reply_fail.returncode == 2
+    assert "passive driver 'none'" in r_reply_fail.stderr
+
+
 def test_zero_install_launcher_shims(tmp_path: Path) -> None:
     if os.name == "nt":
         cmd_shim = REPO_ROOT / "bin" / "aim-mail.cmd"

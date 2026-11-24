@@ -330,6 +330,8 @@ class MailboxStore:
         command: list[str] | None = None,
         binary: str | None = None,
         summary_db: str | None = None,
+        allow_unapproved: bool | None = None,
+        dangerously_skip_permissions: bool | None = None,
     ) -> dict[str, Any]:
         self.ensure_root()
         aid = validate_agent_id(agent_id)
@@ -355,6 +357,10 @@ class MailboxStore:
                 entry["binary"] = binary
             if summary_db is not None:
                 entry["summary_db"] = summary_db
+            if allow_unapproved is not None:
+                entry["allow_unapproved"] = bool(allow_unapproved)
+            if dangerously_skip_permissions is not None:
+                entry["dangerously_skip_permissions"] = bool(dangerously_skip_permissions)
             entry["updated_at"] = utc_iso()
             agents[aid] = entry
             write_json_atomic(self.agents_file, {"schema_version": 1, "agents": agents})

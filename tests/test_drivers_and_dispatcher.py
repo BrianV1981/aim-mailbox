@@ -78,7 +78,7 @@ def test_dry_run_across_all_supported_drivers(tmp_path: Path) -> None:
     ]
     for aid, kwargs in configs:
         store.register_agent(aid, **kwargs)
-        store.send_envelope(from_agent="sender", to_agent=aid, body=f"hello {aid}")
+        store.send_envelope(from_agent="sender", to_agent=aid, body=f"hello {aid}", operator_approved=True)
 
     summary = pulse_mailbox(store, dry_run=True)
     assert len(summary["dispatched"]) == len(configs)
@@ -117,7 +117,7 @@ def test_agy_cli_driver_defers_when_busy_and_autopopulates_session_id_when_idle(
         summary_db=str(summary_db),
         cwd=str(tmp_path),
     )
-    store.send_envelope(from_agent="lead", to_agent="busy-worker", body="wait until idle")
+    store.send_envelope(from_agent="lead", to_agent="busy-worker", body="wait until idle", operator_approved=True)
 
     s_busy = pulse_mailbox(store, agent_id="busy-worker")
     assert len(s_busy["deferred"]) == 1
@@ -134,7 +134,7 @@ def test_agy_cli_driver_defers_when_busy_and_autopopulates_session_id_when_idle(
     conn.close()
 
     store.register_agent("fresh-worker", driver="agy-cli", binary=str(fake_agy), cwd=str(tmp_path))
-    store.send_envelope(from_agent="lead", to_agent="fresh-worker", body="first boot")
+    store.send_envelope(from_agent="lead", to_agent="fresh-worker", body="first boot", operator_approved=True)
 
     s_ok = pulse_mailbox(store)
     assert len(s_ok["dispatched"]) == 2
@@ -159,7 +159,13 @@ def test_agy_desktop_sidecar_driver_and_installer(tmp_path: Path, monkeypatch: p
         binary=str(fake_agentapi),
         session_id="53ddacfd-0000-0000-0000-000000000001",
     )
-    store.send_envelope(from_agent="wsl-joshua", to_agent="win-desktop", body="ping desktop", ack_required=False)
+    store.send_envelope(
+        from_agent="wsl-joshua",
+        to_agent="win-desktop",
+        body="ping desktop",
+        ack_required=False,
+        operator_approved=True,
+    )
 
     # Without ANTIGRAVITY_LS_ADDRESS, delivery fails cleanly and returns to unread/
     monkeypatch.delenv("ANTIGRAVITY_LS_ADDRESS", raising=False)
@@ -251,7 +257,7 @@ def test_opencode_http_driver_creates_session_and_posts_message(tmp_path: Path, 
         monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "s3cr3t")
         store = MailboxStore(tmp_path / "mailbox")
         store.register_agent("oc-worker", driver="opencode-http", http_url=f"http://127.0.0.1:{port}")
-        store.send_envelope(from_agent="lead", to_agent="oc-worker", body="check endpoints")
+        store.send_envelope(from_agent="lead", to_agent="oc-worker", body="check endpoints", operator_approved=True)
 
         summary = pulse_mailbox(store)
         assert len(summary["dispatched"]) == 1
@@ -300,7 +306,7 @@ def test_opencode_http_default_username_captures_http_error_and_persists_session
         monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "pw")
         store = MailboxStore(tmp_path / "mailbox")
         store.register_agent("oc-err", driver="opencode-http", http_url=f"http://127.0.0.1:{port}")
-        store.send_envelope(from_agent="lead", to_agent="oc-err", body="trigger 400")
+        store.send_envelope(from_agent="lead", to_agent="oc-err", body="trigger 400", operator_approved=True)
 
         summary = pulse_mailbox(store)
         assert len(summary["failed"]) == 1
@@ -338,7 +344,12 @@ def test_tmux_driver_sends_enter_only_never_escape(tmp_path: Path) -> None:
 
     store = MailboxStore(tmp_path / "mailbox")
     store.register_agent("tmux-peer", driver="tmux", binary=str(fake_tmux), tmux_session="grok-audit")
-    sent = store.send_envelope(from_agent="aim-joshua", to_agent="tmux-peer", body="Multi-line\nbody\nsafe in maildir")
+    sent = store.send_envelope(
+        from_agent="aim-joshua",
+        to_agent="tmux-peer",
+        body="Multi-line\nbody\nsafe in maildir",
+        operator_approved=True,
+    )
 
     summary = pulse_mailbox(store)
     assert len(summary["dispatched"]) == 1
@@ -382,7 +393,7 @@ def test_sidecar_traversal_and_prompt_field_validation_blocked(tmp_path: Path) -
 def test_pulse_scales_agent_lock_ttl_with_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = MailboxStore(tmp_path / "mailbox")
     store.register_agent("ttl-worker", driver="command", command=[sys.executable, "-c", "print('ok')"])
-    store.send_envelope(from_agent="lead", to_agent="ttl-worker", body="check ttl")
+    store.send_envelope(from_agent="lead", to_agent="ttl-worker", body="check ttl", operator_approved=True)
 
     seen_ttls: list[float] = []
     orig_acquire = store.acquire_agent_lock
@@ -401,12 +412,12 @@ def test_pulse_and_watch_isolate_missing_binary_timeout_and_mid_turn_ack_failure
 
     # Agent 1 (alphabetically first): missing binary -> must fail cleanly, release claim, and NOT starve agent 3
     store.register_agent("alpha-missing", driver="agy-cli", binary=str(tmp_path / "does_not_exist_bin"), cwd=str(tmp_path))
-    m_missing = store.send_envelope(from_agent="lead", to_agent="alpha-missing", body="missing bin")
+    m_missing = store.send_envelope(from_agent="lead", to_agent="alpha-missing", body="missing bin", operator_approved=True)
 
     # Agent 2: driver times out -> must return structured FAILED receipt and release claim back to unread/
     slow_cli = _make_fake_cli(tmp_path, "slow_cli", "import time\ntime.sleep(2.0)\n")
     store.register_agent("beta-timeout", driver="grok-cli", binary=str(slow_cli), cwd=str(tmp_path))
-    m_timeout = store.send_envelope(from_agent="lead", to_agent="beta-timeout", body="timeout me")
+    m_timeout = store.send_envelope(from_agent="lead", to_agent="beta-timeout", body="timeout me", operator_approved=True)
 
     # Agent 3: woken turn ACKs msg[0] mid-turn and then exits 1 (with msg[1] still claimed) -> no MailboxError crash!
     ack_then_fail = _make_fake_cli(
@@ -429,9 +440,9 @@ def test_pulse_and_watch_isolate_missing_binary_timeout_and_mid_turn_ack_failure
         command=[str(ack_then_fail)],
         cwd=str(tmp_path),
     )
-    m_mid0 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="first")
+    m_mid0 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="first", operator_approved=True)
     time.sleep(0.01)
-    m_mid1 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="second")
+    m_mid1 = store.send_envelope(from_agent="lead", to_agent="gamma-midack", body="second", operator_approved=True)
 
     # Agent 4 (alphabetically last): healthy agent -> must STILL be dispatched!
     healthy_marker = tmp_path / "healthy.txt"
@@ -440,7 +451,7 @@ def test_pulse_and_watch_isolate_missing_binary_timeout_and_mid_turn_ack_failure
         driver="command",
         command=[sys.executable, "-c", f"from pathlib import Path; Path({str(healthy_marker)!r}).write_text('ok')"],
     )
-    store.send_envelope(from_agent="lead", to_agent="zeta-healthy", body="still run")
+    store.send_envelope(from_agent="lead", to_agent="zeta-healthy", body="still run", operator_approved=True)
 
     summary = pulse_mailbox(store, timeout=0.2)
     assert len(summary["failed"]) == 3
@@ -498,9 +509,9 @@ def test_woken_active_inbox_multi_message_tmux_command_and_swallowed_enter(tmp_p
         ),
     )
     store.register_agent("tmux-batch", driver="tmux", binary=str(fake_tmux), tmux_session="dev-pane")
-    tm1 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="first")
+    tm1 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="first", operator_approved=True)
     time.sleep(0.01)
-    tm2 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="second")
+    tm2 = store.send_envelope(from_agent="lead", to_agent="tmux-batch", body="second", operator_approved=True)
 
     s_tmux = pulse_mailbox(store, agent_id="tmux-batch")
     assert len(s_tmux["dispatched"]) == 1
@@ -530,7 +541,7 @@ def test_woken_active_inbox_multi_message_tmux_command_and_swallowed_enter(tmp_p
         ),
     )
     store.register_agent("tmux-swallow", driver="tmux", binary=str(swallowed_tmux), tmux_session="swallow")
-    store.send_envelope(from_agent="lead", to_agent="tmux-swallow", body="swallow check")
+    store.send_envelope(from_agent="lead", to_agent="tmux-swallow", body="swallow check", operator_approved=True)
     s_swallow = pulse_mailbox(store, agent_id="tmux-swallow")
     assert len(s_swallow["failed"]) == 1
     assert "unsubmitted" in s_swallow["failed"][0]["error"]
@@ -550,9 +561,9 @@ def test_woken_active_inbox_multi_message_tmux_command_and_swallowed_enter(tmp_p
             "{message_ids}",
         ],
     )
-    cm1 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="one")
+    cm1 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="one", operator_approved=True)
     time.sleep(0.01)
-    cm2 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="two")
+    cm2 = store.send_envelope(from_agent="lead", to_agent="cmd-batch", body="two", operator_approved=True)
     s_cmd = pulse_mailbox(store, agent_id="cmd-batch")
     assert len(s_cmd["dispatched"]) == 1
     batch_data = json.loads(cmd_out.read_text(encoding="utf-8"))
@@ -612,11 +623,49 @@ def test_agentapi_stale_wrapper_agy_idle_presence_lock_and_codex_session_extract
     )
     store = MailboxStore(tmp_path / "mailbox")
     store.register_agent("codex-worker", driver="codex-cli", binary=str(fake_codex), cwd=str(tmp_path))
-    store.send_envelope(from_agent="lead", to_agent="codex-worker", body="run codex")
+    store.send_envelope(from_agent="lead", to_agent="codex-worker", body="run codex", operator_approved=True)
     s_codex = pulse_mailbox(store, agent_id="codex-worker")
     assert len(s_codex["dispatched"]) == 1
     cmd_used = s_codex["dispatched"][0]["result"]["command"]
     assert "--json" in cmd_used and "--add-dir" in cmd_used
     saved_codex = store.get_agent("codex-worker")
     assert saved_codex is not None and saved_codex["session_id"] == "th_codex_99"
+
+
+def test_operator_approved_gate_and_configurable_agy_skip_permissions(tmp_path: Path) -> None:
+    fake_agy = _make_fake_cli(
+        tmp_path,
+        "fake_agy_perm",
+        "import json, sys\nprint(json.dumps({'status': 'SUCCESS', 'argv': sys.argv[1:]}))\n",
+    )
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("guarded", driver="agy-cli", binary=str(fake_agy), cwd=str(tmp_path))
+
+    # Unapproved initial send is blocked from automated pulse wake
+    store.send_envelope(from_agent="rogue", to_agent="guarded", body="unapproved", operator_approved=False)
+    s_blocked = pulse_mailbox(store, agent_id="guarded")
+    assert s_blocked["dispatched"] == []
+    assert any(d["reason"] == "OPERATOR_APPROVAL_REQUIRED" for d in s_blocked["deferred"])
+    assert len(store.list_inbox("guarded", state="unread")) == 1
+
+    # Approved send dispatches WITHOUT --dangerously-skip-permissions unless explicitly configured
+    store.send_envelope(from_agent="lead", to_agent="guarded", body="approved", operator_approved=True)
+    s_ok = pulse_mailbox(store, agent_id="guarded")
+    assert len(s_ok["dispatched"]) == 1
+    cmd_default = s_ok["dispatched"][0]["result"]["command"]
+    assert "--dangerously-skip-permissions" not in cmd_default
+
+    # Explicit per-agent dangerously_skip_permissions=True and allow_unapproved=True
+    store.register_agent(
+        "trusted",
+        driver="agy-cli",
+        binary=str(fake_agy),
+        cwd=str(tmp_path),
+        allow_unapproved=True,
+        dangerously_skip_permissions=True,
+    )
+    store.send_envelope(from_agent="peer", to_agent="trusted", body="allowed", operator_approved=False)
+    s_trusted = pulse_mailbox(store, agent_id="trusted")
+    assert len(s_trusted["dispatched"]) == 1
+    assert "--dangerously-skip-permissions" in s_trusted["dispatched"][0]["result"]["command"]
 

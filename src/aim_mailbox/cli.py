@@ -63,6 +63,8 @@ def cmd_register(args: argparse.Namespace) -> int:
         command=cmd_list,
         binary=args.binary,
         summary_db=args.summary_db,
+        allow_unapproved=args.allow_unapproved,
+        dangerously_skip_permissions=args.dangerously_skip_permissions,
     )
     _emit(
         entry,
@@ -86,6 +88,40 @@ def cmd_agents(args: argparse.Namespace) -> int:
         cwd = cfg.get("cwd") or "-"
         print(f"{aid:<22} driver={str(cfg.get('driver', 'none')):<20} target={sid} cwd={cwd}")
     return 0
+
+
+def _evaluate_wake_exit_code(
+    wake_summary: dict[str, Any] | None,
+    target_agent: str,
+    *,
+    allow_deferred: bool = False,
+) -> int:
+    if not wake_summary:
+        return 0
+    if wake_summary.get("dispatched"):
+        return 0
+    if wake_summary.get("failed"):
+        return 1
+    deferred = wake_summary.get("deferred") or []
+    approval_blocked = [d for d in deferred if d.get("reason") == "OPERATOR_APPROVAL_REQUIRED"]
+    if allow_deferred and deferred and not approval_blocked:
+        return 0
+
+    if wake_summary.get("checked_agents", 0) == 0:
+        reason = f"target agent '{target_agent}' is not registered in agents.json"
+    elif approval_blocked:
+        reason = f"initial wake for '{target_agent}' requires --operator-approved (or agent allow_unapproved)"
+    elif wake_summary.get("skipped"):
+        reason = f"target agent '{target_agent}' has passive driver 'none'"
+    elif wake_summary.get("quarantined"):
+        reason = f"envelope for '{target_agent}' was quarantined"
+    elif deferred:
+        reasons = ", ".join(str(d.get("reason") or "DEFERRED") for d in deferred)
+        reason = f"wake for '{target_agent}' was deferred ({reasons}); pass --allow-deferred if a watcher is active"
+    else:
+        reason = f"no wake driver dispatched for '{target_agent}'"
+    print(f"[WAKE_FAIL] {reason}.", file=sys.stderr)
+    return 2
 
 
 def cmd_send(args: argparse.Namespace) -> int:
@@ -114,15 +150,13 @@ def cmd_send(args: argparse.Namespace) -> int:
         [
             f"[SENT] id={sent['id']} thread={sent['thread_id']} from={sent['from']} -> to={sent['to']}",
             *(
-                [f"[WAKE] dispatched={len(wake_summary['dispatched'])} deferred={len(wake_summary['deferred'])} failed={len(wake_summary['failed'])}"]
+                [f"[WAKE] dispatched={len(wake_summary['dispatched'])} deferred={len(wake_summary['deferred'])} skipped={len(wake_summary['skipped'])} failed={len(wake_summary['failed'])}"]
                 if wake_summary
                 else []
             ),
         ],
     )
-    if wake_summary and wake_summary["failed"]:
-        return 1
-    return 0
+    return _evaluate_wake_exit_code(wake_summary, sent["to"], allow_deferred=args.allow_deferred)
 
 
 def cmd_inbox(args: argparse.Namespace) -> int:
@@ -183,9 +217,7 @@ def cmd_reply(args: argparse.Namespace) -> int:
         args.json,
         [f"[REPLIED] id={sent['id']} thread={sent['thread_id']} from={sent['from']} -> to={sent['to']} (hop={sent['hop_count']}/{sent['max_hops']})"],
     )
-    if wake_summary and wake_summary["failed"]:
-        return 1
-    return 0
+    return _evaluate_wake_exit_code(wake_summary, sent["to"], allow_deferred=args.allow_deferred)
 
 
 def cmd_ack(args: argparse.Namespace) -> int:
@@ -359,6 +391,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("--binary", default=None, help="Optional explicit harness binary path")
     p_reg.add_argument("--summary-db", default=None, help="Optional explicit Antigravity conversation_summaries.db path")
     p_reg.add_argument("--command-json", default=None, help="JSON list of command args for 'command' driver")
+    p_reg.add_argument(
+        "--allow-unapproved",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow pulse dispatch for initial messages without --operator-approved",
+    )
+    p_reg.add_argument(
+        "--dangerously-skip-permissions",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Pass --dangerously-skip-permissions when invoking agy-cli driver",
+    )
     p_reg.add_argument("--unregister", action="store_true", help="Remove agent from registry")
     p_reg.add_argument("--json", action="store_true", help="Emit JSON output")
 
@@ -378,6 +422,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--no-ack-required", action="store_true", help="Mark message as informational (no ACK needed)")
     p_send.add_argument("--operator-approved", action="store_true", help="Record explicit Operator approval on envelope")
     p_send.add_argument("--wake", action="store_true", help="Immediately trigger a pulse dispatch for recipient")
+    p_send.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD as exit 0 on --wake")
     p_send.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_inbox = sub.add_parser("inbox", parents=[common], help="List envelopes in an agent's mailbox")
@@ -401,6 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_reply.add_argument("--no-ack-parent", action="store_true", help="Do not automatically ACK parent message")
     p_reply.add_argument("--ack-required", action="store_true", help="Require recipient to ACK this reply")
     p_reply.add_argument("--wake", action="store_true", help="Immediately trigger a pulse dispatch for reply recipient")
+    p_reply.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD as exit 0 on --wake")
     p_reply.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_ack = sub.add_parser("ack", parents=[common], help="Acknowledge an envelope and move it to done/")
