@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import os
 import re
@@ -48,16 +49,17 @@ def parse_utc_iso(raw: str) -> dt.datetime:
 
 
 def validate_agent_id(raw: str) -> str:
-    """Normalize (strip optional leading '@') and validate a logical agent ID safely across POSIX & Windows."""
+    """Normalize (strip optional leading '@', lowercase) and validate a logical agent ID safely across POSIX & Windows."""
     if not isinstance(raw, str):
         raise MailboxError("Agent ID must be a non-empty string.")
     cleaned = raw.strip()
     if cleaned.startswith("@"):
         cleaned = cleaned[1:]
-    if not cleaned or not AGENT_ID_RE.match(cleaned):
+    if not cleaned or cleaned.endswith(".") or not AGENT_ID_RE.match(cleaned):
         raise MailboxError(
-            f"Invalid agent ID {raw!r}: use 1-64 alphanumeric, '_', '.', or '-' characters (starting with alphanumeric)."
+            f"Invalid agent ID {raw!r}: use 1-64 alphanumeric, '_', '.', or '-' characters (starting with alphanumeric, no trailing '.')."
         )
+    cleaned = cleaned.lower()
     if ".." in cleaned or cleaned.split(".")[0].upper() in WINDOWS_RESERVED_NAMES:
         raise MailboxError(f"Reserved or unsafe agent ID: {raw!r}")
     return cleaned
@@ -108,18 +110,62 @@ def resolve_mailbox_dir(explicit_dir: str | Path | None = None) -> Path:
     return (Path.home() / ".aim" / "mailbox").resolve()
 
 
-def _replace_with_retry(src: Path, dst: Path, retries: int = 4, delay: float = 0.02) -> None:
+def _is_transient_fs_error(exc: OSError) -> bool:
+    return isinstance(exc, PermissionError) or getattr(exc, "errno", None) in (
+        errno.EACCES,
+        errno.EPERM,
+        errno.EBUSY,
+    )
+
+
+def _replace_with_retry(src: Path, dst: Path, retries: int = 6, delay: float = 0.02) -> None:
     last_exc: OSError | None = None
     for attempt in range(retries):
         try:
             os.replace(src, dst)
             return
-        except PermissionError as exc:
+        except OSError as exc:
+            if not _is_transient_fs_error(exc):
+                raise
             last_exc = exc
             if attempt + 1 < retries:
                 time.sleep(delay * (attempt + 1))
     if last_exc is not None:
         raise last_exc
+
+
+def _unlink_with_retry(path: Path, retries: int = 6, delay: float = 0.02) -> None:
+    last_exc: OSError | None = None
+    for attempt in range(retries):
+        try:
+            path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            if not _is_transient_fs_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < retries:
+                time.sleep(delay * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+
+
+def _read_text_with_retry(path: Path, retries: int = 6, delay: float = 0.02) -> str:
+    last_exc: OSError | None = None
+    for attempt in range(retries):
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError as exc:
+            if isinstance(exc, FileNotFoundError) or not _is_transient_fs_error(exc):
+                raise
+            last_exc = exc
+            if attempt + 1 < retries:
+                time.sleep(delay * (attempt + 1))
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 
 def write_json_atomic(dst: Path, payload: Any, tmp_dir: Path | None = None) -> None:
@@ -181,16 +227,68 @@ class MailboxStore:
     # ------------------------------------------------------------------
     # Logical Agent Address Book (agents.json)
     # ------------------------------------------------------------------
-    def load_agents(self) -> dict[str, dict[str, Any]]:
+    def _read_agents_raw(self, *, strict: bool = False) -> dict[str, dict[str, Any]]:
         if not self.agents_file.is_file():
             return {}
         try:
-            data = json.loads(self.agents_file.read_text(encoding="utf-8"))
+            raw_text = _read_text_with_retry(self.agents_file)
+            data = json.loads(raw_text)
             if isinstance(data, dict) and isinstance(data.get("agents"), dict):
                 return data["agents"]
+            if strict:
+                raise MailboxError(f"Corrupt agent registry in {self.agents_file}: expected object with 'agents' dict.")
+        except (OSError, json.JSONDecodeError) as exc:
+            if strict:
+                raise MailboxError(f"Failed to read agent registry {self.agents_file}: {exc}") from exc
+        return {}
+
+    def _acquire_agents_lock(self, timeout: float = 5.0) -> tuple[Path, str]:
+        self.ensure_root()
+        lock_path = self.locks_dir / "_agents.lock.json"
+        token = uuid.uuid4().hex
+        deadline = time.monotonic() + max(0.5, float(timeout))
+        while True:
+            now = utc_now()
+            payload = {
+                "token": token,
+                "pid": os.getpid(),
+                "acquired_at": utc_iso(now),
+                "expires_at": utc_iso(now + dt.timedelta(seconds=10.0)),
+            }
+            try:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    json.dump(payload, fh)
+                    fh.write("\n")
+                _chmod_safe(lock_path, 0o600)
+                return lock_path, token
+            except FileExistsError:
+                try:
+                    existing = json.loads(_read_text_with_retry(lock_path))
+                    if utc_now() >= parse_utc_iso(existing["expires_at"]):
+                        stale_tok = str(existing.get("token") or "")
+                        if stale_tok:
+                            self._reclaim_stale_lock(lock_path, "_agents", stale_tok)
+                except (OSError, KeyError, ValueError, json.JSONDecodeError):
+                    try:
+                        if lock_path.exists() and (time.time() - lock_path.stat().st_mtime) > 10.0:
+                            _unlink_with_retry(lock_path)
+                    except OSError:
+                        pass
+                if time.monotonic() >= deadline:
+                    raise MailboxError(f"Timed out waiting for agent registry lock: {lock_path}")
+                time.sleep(0.01)
+
+    def _release_agents_lock(self, lock_path: Path, token: str) -> None:
+        try:
+            existing = json.loads(_read_text_with_retry(lock_path))
+            if existing.get("token") == token:
+                _unlink_with_retry(lock_path)
         except (OSError, json.JSONDecodeError):
             pass
-        return {}
+
+    def load_agents(self) -> dict[str, dict[str, Any]]:
+        return self._read_agents_raw(strict=False)
 
     def get_agent(self, agent_id: str) -> dict[str, Any] | None:
         aid = validate_agent_id(agent_id)
@@ -212,42 +310,84 @@ class MailboxStore:
         self.ensure_root()
         aid = validate_agent_id(agent_id)
         self.ensure_agent_box(aid)
-        agents = self.load_agents()
-        entry = dict(agents.get(aid) or {"agent_id": aid, "driver": "none"})
-        entry["agent_id"] = aid
-        if driver is not None:
-            entry["driver"] = driver.strip()
-        if cwd is not None:
-            entry["cwd"] = cwd
-        if session_id is not None:
-            entry["session_id"] = session_id
-        if tmux_session is not None:
-            entry["tmux_session"] = tmux_session
-        if http_url is not None:
-            entry["http_url"] = http_url
-        if command is not None:
-            entry["command"] = list(command)
-        if binary is not None:
-            entry["binary"] = binary
-        if summary_db is not None:
-            entry["summary_db"] = summary_db
-        entry["updated_at"] = utc_iso()
-        agents[aid] = entry
-        write_json_atomic(self.agents_file, {"schema_version": 1, "agents": agents})
-        return entry
+        lock_path, token = self._acquire_agents_lock()
+        try:
+            agents = self._read_agents_raw(strict=True)
+            entry = dict(agents.get(aid) or {"agent_id": aid, "driver": "none"})
+            entry["agent_id"] = aid
+            if driver is not None:
+                entry["driver"] = driver.strip()
+            if cwd is not None:
+                entry["cwd"] = cwd
+            if session_id is not None:
+                entry["session_id"] = session_id
+            if tmux_session is not None:
+                entry["tmux_session"] = tmux_session
+            if http_url is not None:
+                entry["http_url"] = http_url
+            if command is not None:
+                entry["command"] = list(command)
+            if binary is not None:
+                entry["binary"] = binary
+            if summary_db is not None:
+                entry["summary_db"] = summary_db
+            entry["updated_at"] = utc_iso()
+            agents[aid] = entry
+            write_json_atomic(self.agents_file, {"schema_version": 1, "agents": agents})
+            return entry
+        finally:
+            self._release_agents_lock(lock_path, token)
 
     def unregister_agent(self, agent_id: str) -> bool:
         aid = validate_agent_id(agent_id)
-        agents = self.load_agents()
-        if aid not in agents:
-            return False
-        del agents[aid]
-        write_json_atomic(self.agents_file, {"schema_version": 1, "agents": agents})
-        return True
+        lock_path, token = self._acquire_agents_lock()
+        try:
+            agents = self._read_agents_raw(strict=True)
+            if aid not in agents:
+                return False
+            del agents[aid]
+            write_json_atomic(self.agents_file, {"schema_version": 1, "agents": agents})
+            return True
+        finally:
+            self._release_agents_lock(lock_path, token)
 
     # ------------------------------------------------------------------
     # Per-Agent Dispatch Lease Locks (locks/<agent>.lock.json)
     # ------------------------------------------------------------------
+    def _reclaim_stale_lock(self, lock_path: Path, lock_key: str, expected_token: str | None) -> bool:
+        guard_tag = re.sub(r"[^A-Za-z0-9_.-]", "_", expected_token or "corrupt")[:40]
+        guard_path = self.locks_dir / f".reclaim_{lock_key}_{guard_tag}"
+        try:
+            gfd = os.open(str(guard_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            os.close(gfd)
+        except FileExistsError:
+            try:
+                if (time.time() - guard_path.stat().st_mtime) > 5.0:
+                    _unlink_with_retry(guard_path)
+            except OSError:
+                pass
+            return False
+
+        try:
+            if not lock_path.exists():
+                return False
+            if expected_token is not None:
+                try:
+                    current = json.loads(_read_text_with_retry(lock_path))
+                    if current.get("token") != expected_token:
+                        return False
+                except (OSError, json.JSONDecodeError):
+                    return False
+            _unlink_with_retry(lock_path)
+            return True
+        except OSError:
+            return False
+        finally:
+            try:
+                guard_path.unlink()
+            except OSError:
+                pass
+
     def acquire_agent_lock(self, agent_id: str, ttl_seconds: float = 600.0) -> str | None:
         self.ensure_root()
         aid = validate_agent_id(agent_id)
@@ -273,16 +413,17 @@ class MailboxStore:
                 return token
             except FileExistsError:
                 try:
-                    existing = json.loads(lock_path.read_text(encoding="utf-8"))
+                    existing = json.loads(_read_text_with_retry(lock_path))
                     exp = parse_utc_iso(existing["expires_at"])
                     if utc_now() >= exp:
-                        lock_path.unlink()
-                        continue
+                        stale_tok = str(existing.get("token") or "")
+                        if stale_tok and self._reclaim_stale_lock(lock_path, aid, stale_tok):
+                            continue
                 except (OSError, KeyError, ValueError, json.JSONDecodeError):
                     try:
                         if lock_path.exists() and (time.time() - lock_path.stat().st_mtime) > ttl_seconds:
-                            lock_path.unlink()
-                            continue
+                            if self._reclaim_stale_lock(lock_path, aid, None):
+                                continue
                     except OSError:
                         pass
                 return None
@@ -294,10 +435,10 @@ class MailboxStore:
         if not lock_path.is_file():
             return False
         try:
-            existing = json.loads(lock_path.read_text(encoding="utf-8"))
+            existing = json.loads(_read_text_with_retry(lock_path))
             if existing.get("token") != token:
                 return False
-            lock_path.unlink()
+            _unlink_with_retry(lock_path)
             return True
         except (OSError, json.JSONDecodeError):
             return False
@@ -461,6 +602,20 @@ class MailboxStore:
         out["state"] = "claimed"
         return out
 
+    def _transition_envelope(
+        self,
+        src_path: Path,
+        dst_path: Path,
+        data: dict[str, Any],
+        box: Path,
+        target_state: str,
+    ) -> None:
+        _ensure_within(dst_path, box / target_state, "destination envelope")
+        _ensure_within(src_path, box, "source envelope")
+        if src_path != dst_path:
+            _replace_with_retry(src_path, dst_path)
+        write_json_atomic(dst_path, data, tmp_dir=box / "tmp")
+
     def release_claim(
         self,
         agent_id: str,
@@ -491,17 +646,11 @@ class MailboxStore:
             dst = box / "dead" / f"{data['id']}.json"
             target_state = "dead"
         else:
+            data.pop("claimed_at", None)
             dst = box / "unread" / f"{data['id']}.json"
             target_state = "unread"
 
-        _ensure_within(dst, box / target_state, "destination envelope")
-        _ensure_within(path, box, "source envelope")
-        write_json_atomic(dst, data, tmp_dir=box / "tmp")
-        if path != dst and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        self._transition_envelope(path, dst, data, box, target_state)
         out = dict(data)
         out["state"] = target_state
         return out
@@ -552,14 +701,7 @@ class MailboxStore:
             dst = box / "claimed" / f"{data['id']}.json"
             target_state = "claimed"
 
-        _ensure_within(dst, box / target_state, "destination envelope")
-        _ensure_within(path, box, "source envelope")
-        write_json_atomic(dst, data, tmp_dir=box / "tmp")
-        if path != dst and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        self._transition_envelope(path, dst, data, box, target_state)
         out = dict(data)
         out["state"] = target_state
         return out
@@ -596,21 +738,14 @@ class MailboxStore:
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
         box = self.ensure_agent_box(aid)
-        st, path, data = self._find_envelope(aid, msg_id_or_prefix, states=("unread", "claimed", "done"))
+        _, path, data = self._find_envelope(aid, msg_id_or_prefix, states=("unread", "claimed", "done"))
         data["acked_at"] = data.get("acked_at") or utc_iso()
         if note.strip():
             data["ack_note"] = note.strip()
         if delivery is not None:
             data["delivery"] = delivery
         dst = box / "done" / f"{data['id']}.json"
-        _ensure_within(dst, box / "done", "destination envelope")
-        _ensure_within(path, box, "source envelope")
-        write_json_atomic(dst, data, tmp_dir=box / "tmp")
-        if st != "done" and path != dst and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        self._transition_envelope(path, dst, data, box, "done")
         out = dict(data)
         out["state"] = "done"
         return out
@@ -625,20 +760,13 @@ class MailboxStore:
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
         box = self.ensure_agent_box(aid)
-        st, path, data = self._find_envelope(aid, msg_id_or_prefix, states=("unread", "claimed", "dead"))
+        _, path, data = self._find_envelope(aid, msg_id_or_prefix, states=("unread", "claimed", "dead"))
         data["dead_reason"] = reason
         data["quarantined_at"] = utc_iso()
         if delivery is not None:
             data["delivery"] = delivery
         dst = box / "dead" / f"{data['id']}.json"
-        _ensure_within(dst, box / "dead", "destination envelope")
-        _ensure_within(path, box, "source envelope")
-        write_json_atomic(dst, data, tmp_dir=box / "tmp")
-        if st != "dead" and path != dst and path.exists():
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        self._transition_envelope(path, dst, data, box, "dead")
         out = dict(data)
         out["state"] = "dead"
         return out

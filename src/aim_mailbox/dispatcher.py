@@ -83,7 +83,8 @@ def pulse_mailbox(
             )
             continue
 
-        lock_token = store.acquire_agent_lock(aid, ttl_seconds=lock_ttl_seconds)
+        effective_lock_ttl = max(float(lock_ttl_seconds), float(timeout) + 60.0)
+        lock_token = store.acquire_agent_lock(aid, ttl_seconds=effective_lock_ttl)
         if not lock_token:
             summary["deferred"].append({"agent_id": aid, "reason": "AGENT_LOCK_HELD"})
             continue

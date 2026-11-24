@@ -195,3 +195,90 @@ def test_message_id_path_traversal_blocked_and_permissions_enforced(tmp_path: Pa
         assert stat.S_IMODE(env_file.stat().st_mode) == 0o600
 
     store.release_agent_lock("worker", tok)
+
+
+def test_agent_id_normalization_agents_lock_and_atomic_state_transitions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import errno as _errno
+
+    # Trailing dots blocked; mixed case normalized to lowercase
+    with pytest.raises(MailboxError):
+        validate_agent_id("worker.")
+    assert validate_agent_id("@CopyCat") == "copycat"
+
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("CopyCat", driver="none")
+    store.register_agent("OtherAgent", driver="none")
+    assert set(store.load_agents().keys()) == {"copycat", "otheragent"}
+
+    # Corrupt agents.json must NOT be silently wiped on register_agent
+    store.agents_file.write_text("{corrupt-json", encoding="utf-8")
+    with pytest.raises(MailboxError):
+        store.register_agent("third", driver="none")
+    assert store.agents_file.read_text(encoding="utf-8") == "{corrupt-json"
+
+    # Reset valid agents.json and verify concurrent register_agent does not drop entries
+    store.agents_file.unlink()
+    errors: list[Exception] = []
+
+    def _reg(idx: int) -> None:
+        try:
+            store.register_agent(f"peer-{idx}", driver="none")
+        except Exception as exc:  # pragma: no cover
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_reg, args=(i,)) for i in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5.0)
+    assert errors == []
+    assert len(store.load_agents()) == 6
+
+    # release_claim clears claimed_at and retries EBUSY on os.replace without duplicating files
+    msg = store.send_envelope(from_agent="peer-0", to_agent="peer-1", body="atomic check")
+    claimed = store.claim_envelope("peer-1", msg["id"])
+    assert claimed is not None and "claimed_at" in claimed
+
+    orig_replace = os.replace
+    calls = {"ebusy": 0}
+
+    def flaky_replace(src: Any, dst: Any) -> None:
+        if calls["ebusy"] == 0 and str(dst).endswith(f"{msg['id']}.json") and "unread" in str(dst):
+            calls["ebusy"] += 1
+            raise OSError(_errno.EBUSY, "Device or resource busy")
+        orig_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", flaky_replace)
+    released = store.release_claim("peer-1", msg["id"], defer=True)
+    assert calls["ebusy"] == 1
+    assert released["state"] == "unread"
+    assert "claimed_at" not in released
+    assert len(store.list_inbox("peer-1", state="claimed")) == 0
+    assert len(store.list_inbox("peer-1", state="unread")) == 1
+
+    # Concurrent stale-lock reclamation never unlinks a peer's freshly acquired lock
+    tok_stale = store.acquire_agent_lock("peer-1", ttl_seconds=1.0)
+    assert tok_stale is not None
+    lock_file = store.locks_dir / "peer-1.lock.json"
+    lock_data = json.loads(lock_file.read_text(encoding="utf-8"))
+    lock_data["expires_at"] = utc_iso(utc_now() - dt.timedelta(seconds=10))
+    lock_file.write_text(json.dumps(lock_data), encoding="utf-8")
+
+    winners: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def _contend() -> None:
+        barrier.wait()
+        tok = store.acquire_agent_lock("peer-1", ttl_seconds=60.0)
+        if tok is not None:
+            winners.append(tok)
+
+    contenders = [threading.Thread(target=_contend) for _ in range(4)]
+    for t in contenders:
+        t.start()
+    for t in contenders:
+        t.join(timeout=5.0)
+    assert len(winners) == 1
+    assert store.release_agent_lock("peer-1", winners[0]) is True

@@ -298,10 +298,28 @@ def test_sidecar_traversal_and_prompt_field_validation_blocked(tmp_path: Path) -
 
     assert sentinel.is_file()
 
+    assert build_wake_prompt("worker", [{"id": "20261118T000000Z_12345678", "from": "sender"}], mb)
     with pytest.raises(MailboxError):
         build_wake_prompt("worker", [{"id": "bad\nid", "from": "sender"}], mb)
     with pytest.raises(MailboxError):
         build_wake_prompt("worker", [{"id": "20261118T000000Z_12345678", "from": "bad\nfrom"}], mb)
     with pytest.raises(MailboxError):
         build_tmux_doorbell("worker", {"id": "20261118T000000Z_12345678", "from": "sender", "reply_to": "../bad"}, mb)
+
+
+def test_pulse_scales_agent_lock_ttl_with_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("ttl-worker", driver="command", command=[sys.executable, "-c", "print('ok')"])
+    store.send_envelope(from_agent="lead", to_agent="ttl-worker", body="check ttl")
+
+    seen_ttls: list[float] = []
+    orig_acquire = store.acquire_agent_lock
+
+    def spy_acquire(aid: str, ttl_seconds: float = 600.0) -> str | None:
+        seen_ttls.append(ttl_seconds)
+        return orig_acquire(aid, ttl_seconds=ttl_seconds)
+
+    monkeypatch.setattr(store, "acquire_agent_lock", spy_acquire)
+    pulse_mailbox(store, timeout=900.0)
+    assert seen_ttls == [960.0]
 
