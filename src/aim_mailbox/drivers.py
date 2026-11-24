@@ -132,11 +132,14 @@ def _is_healthy_agentapi_wrapper(path: Path) -> bool:
         return False
     if not head.startswith(b"#!"):
         return True
+    if os.name == "nt":
+        return False
     text = head.decode("utf-8", errors="ignore")
     m = re.search(r"""exec\s+["']?([^"'\s]+)["']?""", text)
     if m:
-        target = Path(m.group(1))
-        if target.is_absolute() and not target.is_file():
+        raw_target = m.group(1)
+        target = Path(raw_target)
+        if (target.is_absolute() or raw_target.startswith("/")) and not target.is_file():
             return False
     return True
 
@@ -568,15 +571,17 @@ def _dispatch_wake_inner(
     if driver == "tmux":
         tmux_bin = agent_cfg.get("binary") or shutil.which("tmux") or "tmux"
         target_session = str(agent_cfg.get("tmux_session") or agent_id).strip()
-        exact_target = target_session if target_session.startswith("=") else f"={target_session}"
+        clean_target = target_session.lstrip("=")
+        session_target = f"={clean_target.split(':', 1)[0]}"
+        pane_target = f"={clean_target}" if ":" in clean_target else f"={clean_target}:"
         doorbell = build_tmux_doorbell(agent_id, envelopes, mailbox_dir)
         msg_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
         buf_name = f"aim_mail_{msg_ids[0][-12:]}"
         plan = [
-            [str(tmux_bin), "has-session", "-t", exact_target],
+            [str(tmux_bin), "has-session", "-t", session_target],
             [str(tmux_bin), "set-buffer", "-b", buf_name, "--", doorbell],
-            [str(tmux_bin), "paste-buffer", "-b", buf_name, "-d", "-p", "-t", exact_target],
-            [str(tmux_bin), "send-keys", "-t", exact_target, "Enter"],
+            [str(tmux_bin), "paste-buffer", "-b", buf_name, "-d", "-p", "-t", pane_target],
+            [str(tmux_bin), "send-keys", "-t", pane_target, "Enter"],
         ]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": plan[-1], "doorbell": doorbell, "delivered_at": utc_iso()}
@@ -598,7 +603,7 @@ def _dispatch_wake_inner(
         sub = subprocess.run(plan[3], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10)
         time.sleep(0.4)
         cap = subprocess.run(
-            [str(tmux_bin), "capture-pane", "-t", exact_target, "-p", "-J", "-S", "-120"],
+            [str(tmux_bin), "capture-pane", "-t", pane_target, "-p", "-J", "-S", "-120"],
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,

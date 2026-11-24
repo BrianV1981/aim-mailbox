@@ -31,7 +31,7 @@ def _make_fake_cli(tmp_path: Path, name: str, py_body: str) -> Path:
     py_script.write_text(py_body, encoding="utf-8")
     if os.name == "nt":
         wrapper = tmp_path / f"{name}.cmd"
-        wrapper.write_text(f'@echo off\r\n"{sys.executable}" "{py_script}" %*\r\n', encoding="utf-8")
+        wrapper.write_text(f'@echo off\r\n"{sys.executable}" -X utf8 "{py_script}" %*\r\n', encoding="utf-8")
         return wrapper
     wrapper = tmp_path / name
     wrapper.write_text(f"#!{sys.executable}\n{py_body}", encoding="utf-8")
@@ -668,4 +668,78 @@ def test_operator_approved_gate_and_configurable_agy_skip_permissions(tmp_path: 
     s_trusted = pulse_mailbox(store, agent_id="trusted")
     assert len(s_trusted["dispatched"]) == 1
     assert "--dangerously-skip-permissions" in s_trusted["dispatched"][0]["result"]["command"]
+
+
+@pytest.mark.skipif(shutil.which("tmux") is None, reason="tmux binary not available on this host")
+def test_real_tmux_target_pane_delivery_and_exact_session_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess as _sp
+    import uuid as _uuid
+
+    tmux_tmp = tmp_path / f"tmux_sock_{_uuid.uuid4().hex[:8]}"
+    tmux_tmp.mkdir(mode=0o700)
+    monkeypatch.delenv("TMUX", raising=False)
+    monkeypatch.setenv("TMUX_TMPDIR", str(tmux_tmp))
+
+    try:
+        # Start two sessions where one name is a prefix of the other to verify exact '=' targeting
+        _sp.run(["tmux", "new-session", "-d", "-s", "probe-extra", "cat"], check=True, timeout=10)
+        _sp.run(["tmux", "new-session", "-d", "-s", "probe", "cat"], check=True, timeout=10)
+
+        sock_chk = _sp.run(
+            ["tmux", "display-message", "-t", "=probe:", "-p", "#{socket_path}"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=10,
+        )
+        assert Path(sock_chk.stdout.strip()).resolve().is_relative_to(tmux_tmp.resolve())
+
+        store = MailboxStore(tmp_path / "mailbox")
+        store.register_agent("probe", driver="tmux", tmux_session="probe")
+        sent = store.send_envelope(
+            from_agent="lead",
+            to_agent="probe",
+            body="real tmux integration test",
+            operator_approved=True,
+        )
+
+        summary = pulse_mailbox(store, agent_id="probe")
+        assert summary["failed"] == []
+        assert len(summary["dispatched"]) == 1
+        assert summary["dispatched"][0]["result"]["status"] == "DELIVERED"
+
+        cap_extra = _sp.run(
+            ["tmux", "capture-pane", "-t", "=probe-extra:", "-p"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert sent["id"] not in cap_extra.stdout
+    finally:
+        if os.environ.get("TMUX") is None and os.environ.get("TMUX_TMPDIR") == str(tmux_tmp):
+            sock_chk = _sp.run(
+                ["tmux", "display-message", "-p", "#{socket_path}"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            sock_p = sock_chk.stdout.strip()
+            if sock_chk.returncode == 0 and sock_p and Path(sock_p).resolve().is_relative_to(tmux_tmp.resolve()):
+                _sp.run(["tmux", "kill-server"], capture_output=True, timeout=10)
+
+
+def test_is_healthy_agentapi_wrapper_rejects_shebang_on_windows_and_posix_abs_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from aim_mailbox.drivers import _is_healthy_agentapi_wrapper
+
+    shebang_shim = tmp_path / "agentapi"
+    shebang_shim.write_text('#!/bin/sh\nexec "/nonexistent/agy.real" agentapi "$@"\n', encoding="utf-8")
+    monkeypatch.setattr(os, "name", "nt")
+    assert _is_healthy_agentapi_wrapper(shebang_shim) is False
+
+    monkeypatch.setattr(os, "name", "posix")
+    assert _is_healthy_agentapi_wrapper(shebang_shim) is False
 

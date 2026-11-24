@@ -75,7 +75,7 @@ aim-mail pulse
 | Driver | Target Surface | Session Targeting & Wake Mechanics |
 | :--- | :--- | :--- |
 | `agy-desktop-sidecar` | **Antigravity Desktop / IDE** (Win11, macOS, Linux) | Runs inside an official Antigravity Sidecar (`aim-mail install-agy-sidecar`) and invokes `agentapi send-message <conversation_id> <prompt>` — works even while the Desktop app is minimized. |
-| `agy-cli` | **Antigravity CLI (`agy`)** (Win11, WSL2, macOS, Linux) | Checks read-only `conversation_summaries.db` (`CASCADE_RUN_STATUS_IDLE`), wakes `agy --conversation <uuid> --output-format json --dangerously-skip-permissions -p <prompt>`, and auto-saves first-run `conversation_id` to `agents.json`. |
+| `agy-cli` | **Antigravity CLI (`agy`)** (Win11, WSL2, macOS, Linux) | Checks read-only `conversation_summaries.db` (`CASCADE_RUN_STATUS_IDLE`) + `presence/<uuid>.lock`, wakes `agy --conversation <uuid> --output-format json -p <prompt>` (permission skipping is disabled by default; opt-in via `--allow-skip-permissions`), and auto-saves first-run `conversation_id` to `agents.json`. |
 | `opencode-http` | **OpenCode Desktop + CLI** (`opencode serve`) | Sends `POST http://127.0.0.1:4096/session/<id>/message` (auto-creating a session via `POST /session` if unset). |
 | `grok-cli` | **Grok Build (`grok`)** (Win11, WSL2, macOS, Linux) | Wakes `grok --no-auto-update --output-format json [--resume <id>] [--cwd <dir>] -p <prompt>`. |
 | `codex-cli` | **OpenAI Codex CLI** (Win11, WSL2, macOS, Linux) | Wakes `codex exec resume <id> <prompt>` (or `codex exec <prompt>` on initial run). |

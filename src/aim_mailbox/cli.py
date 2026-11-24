@@ -401,7 +401,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--dangerously-skip-permissions",
         action=argparse.BooleanOptionalAction,
         default=None,
-        help="Pass --dangerously-skip-permissions when invoking agy-cli driver",
+        help="Pass --dangerously-skip-permissions when invoking agy-cli driver (disabled by default)",
+    )
+    p_reg.add_argument(
+        "--allow-skip-permissions",
+        dest="dangerously_skip_permissions",
+        action="store_true",
+        default=argparse.SUPPRESS,
+        help="Alias for --dangerously-skip-permissions",
     )
     p_reg.add_argument("--unregister", action="store_true", help="Remove agent from registry")
     p_reg.add_argument("--json", action="store_true", help="Emit JSON output")

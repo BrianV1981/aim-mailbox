@@ -2,6 +2,13 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.1.2] - 2026-11-23
+
+### Security & Reliability
+- **Path Confinement, Permissions & Validation (`#3`, `#6`, `#8`):** Blocked `../` traversal on `message_id`, envelope `id`, and `--sidecar-id`, enforced `0o700`/`0o600` file permissions, validated `session_id`/`http_url`, normalized `agent_id` to lowercase (disallowing trailing `.`), locked `agents.json` RMW, eliminated `acquire_agent_lock()` stale-unlink TOCTOU, and retried `EBUSY`/`PermissionError` atomic moves.
+- **Thread & Dispatcher Integrity (`#4`, `#5`, `#7`, `#9`):** Propagated thread `hop_count` on `send --thread-id`, rejected over-hop/`dead/` replies, added `wait --claim` and `inbox --state active`, kept async `ack_required=False` wakes readable until read, isolated driver OS/subprocess/HTTP failures in `pulse`/`watch`, and enforced fail-closed `--wake` exits plus initial `operator_approved` gating.
+- **Real `tmux` & Windows CI Fixes (`#6`, `#11`):** Separated `tmux` `session_target` (`=name`) from `pane_target` (`=name:`), updated `opencode-http` to OpenCode `parts` schema, fixed `bin/aim-mail.cmd` exit-code propagation, fixed Windows wrapper/UTF-8 test shim handling, and made `--dangerously-skip-permissions` opt-in for `agy-cli`.
+
 ## [0.1.1] - 2026-11-20
 
 ### Fixed

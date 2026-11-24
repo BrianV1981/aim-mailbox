@@ -38,9 +38,9 @@ While [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md
   3. Pre-flight idle check verifies `status == 'CASCADE_RUN_STATUS_IDLE'` and `not_fully_idle == 0` in `conversation_summaries.db` (and absence of an active interactive lock in `presence/<uuid>.lock`).
 - **Execution Command:**
   ```powershell
-  agy.exe --conversation <uuid> --output-format json --dangerously-skip-permissions -p "You have unread mail. Run aim-mail inbox, complete tasks, and ack."
+  agy.exe --conversation <uuid> --output-format json -p "You have unread mail. Run aim-mail inbox --state active, complete tasks, and ack."
   ```
-  Boots the exact historical session in `cwd`, executes tool calls, appends the turn to `conversations/<uuid>.db`, prints a JSON receipt, and exits cleanly (`0` idle RAM). Never hold the same `<uuid>` open simultaneously in an interactive terminal window.
+  Boots the exact historical session in `cwd`, executes tool calls, appends the turn to `conversations/<uuid>.db`, prints a JSON receipt, and exits cleanly (`0` idle RAM). Permission skipping (`--dangerously-skip-permissions`) is **disabled by default** and opt-in per registered agent (`--allow-skip-permissions` / `--dangerously-skip-permissions`). Never hold the same `<uuid>` open simultaneously in an interactive terminal window.
 - **WSL2 → Windows Subprocess Trap:** Whenever invoking `powershell.exe` or Windows Python from WSL2, always close stdin (`< /dev/null` and `-NoLogo -NonInteractive -NoProfile`) so PowerShell never hangs waiting on open stdin.
 
 ### C. OpenCode Desktop + CLI (`opencode-http`)
