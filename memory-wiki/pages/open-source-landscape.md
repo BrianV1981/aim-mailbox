@@ -29,3 +29,18 @@ A late-2026 landscape audit of open-source local inter-agent mail and relay syst
 - **From `@juanjofuchs/agent-mail`:** Keep message bodies concise, pass large specs/diffs by filesystem path (`--ref <path>`), and expose a self-describing JSON/CLI contract (`--help` / `describe`) instead of dozens of MCP tools.
 - **From `gt mail`:** Support fast `<15ms` `aim-mail check --inject` turn hooks as an optional supplement for mid-turn awareness.
 - **Unique to `aim-mailbox`:** Lock-free Maildir JSON across NTFS + WSL2 (see [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md)), Operator permission + `max_hops` loop prevention (see [Unified Skill Strategy (`aim-communicate` v2)](aim-communicate-v2-migration.md)), and deterministic Windows 11 Desktop Sidecar / HTTP / CLI wake drivers (see [Windows 11 & Cross-OS Drivers](windows-11-and-cross-os-drivers.md)).
+
+---
+
+## 4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)
+When borrowing ideas from competing orchestrators (advisory leases, turn hooks, priority batching, thread search/GC, and `events.jsonl` telemetry), contributors **MUST reject** these specific competitor pitfalls that violate `aim-mailbox`'s core invariants:
+
+1. **No SQLite or FTS5 Databases (`hcom`, `mcp_agent_mail`, `agent-mail-cli`):**
+   - **Pitfall:** SQLite WAL locks and shared-memory (`-shm`/`-wal`) files break or throw `database is locked` across native Windows 11 NTFS ↔ WSL2 `/mnt/c` (`9P`) shares.
+   - **Rule:** Keep state (`boxes/`, `agents.json`, `locks/`, future advisory `leases/`) and queries (`search`/`gc`) 100% pure-stdlib JSON / JSONL Maildir files using atomic `os.replace()`, `O_CREAT | O_EXCL` leases, and NTFS `winerror 5/32` retries.
+2. **No Always-On Socket Daemons or Mandatory PTY Wrappers (`AgentWorkforce/relay`, `hcom`):**
+   - **Pitfall:** Requiring a resident Unix-socket server (`relay.sock`) or wrapping every interactive agent inside a PTY proxy wastes idle RAM, reintroduces daemon lifecycle failures, breaks native Windows 11 Desktop/GUI workflows, and loses the stateless `pulse` model.
+   - **Rule:** Expose observability via passive append-only `events.jsonl` + read-only `tail` streams for external dashboards (`aim-office`), and wire turn-boundary hooks passively (`check --inject`) without wrapping interactive CLI processes.
+3. **No Heavy Startup MCP Tool Bloat (`mcp_agent_mail`):**
+   - **Pitfall:** Loading 30+ MCP tool schemas into every session consumes thousands of context tokens at startup just to read or send mail.
+   - **Rule:** Keep the primary surface as a ~50-token self-describing CLI (`aim-mail --help` / `describe --json`) with `0` runtime pip dependencies.

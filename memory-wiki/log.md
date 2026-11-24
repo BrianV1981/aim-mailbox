@@ -1,5 +1,9 @@
 # Memory Log
 
+## [2026-11-24] ingest | Roadmap Enhancements (`#12`–`#16`) & Explicit Non-Goal Guardrails
+- Added `§4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)` to `pages/open-source-landscape.md` documenting why `aim-mailbox` rejects SQLite/FTS5 WAL storage (breaks across Windows 11 NTFS ↔ WSL2 `9P`), always-on socket daemons / mandatory PTY wrappers (breaks stateless `0`-RAM Win11/Sidecar model), and 30-tool startup MCP bloat.
+- Tracked the five compatible OSS-inspired roadmap items in GitHub Issues `#12`–`#16` (`reserve`/`release` lock-free leases, `install-hooks`, `priority` + `--coalesce-key` batching, stdlib `search`/`gc`, and bounded `events.jsonl` + `tail`).
+
 ## [2026-11-23] ingest | Resolved Audit Issues `#3`–`#10` (Security, Atomicity, Dispatcher & Driver Hardening)
 - Closed all 8 open issues (`#3`, `#4`, `#5`, `#6`, `#7`, `#8`, `#9`, `#10`) via isolated GitOps worktrees, moving all 10 project board items to `Done` and pruning stale `origin/archive-fix/*` branches.
 - **Security & Validation (`#3`, `#8`):** Added `validate_message_id()`, `validate_session_id()`, `validate_http_url()`, `.resolve().is_relative_to(...)` path confinement across Maildir + sidecar install/uninstall, `0o700`/`0o600` permissions, lowercase `validate_agent_id()` normalization (blocking trailing `.` and NTFS case collisions), locked `agents.json` RMW, `EBUSY`-aware atomic transitions, and TOCTOU-safe stale-lock reclamation.
