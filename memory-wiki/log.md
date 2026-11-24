@@ -1,8 +1,8 @@
 # Memory Log
 
-## [2026-11-24] ingest | Roadmap Enhancements (`#12`–`#16`) & Explicit Non-Goal Guardrails
-- Added `§4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)` to `pages/open-source-landscape.md` documenting why `aim-mailbox` rejects SQLite/FTS5 WAL storage (breaks across Windows 11 NTFS ↔ WSL2 `9P`), always-on socket daemons / mandatory PTY wrappers (breaks stateless `0`-RAM Win11/Sidecar model), and 30-tool startup MCP bloat.
-- Tracked the five compatible OSS-inspired roadmap items in GitHub Issues `#12`–`#16` (`reserve`/`release` lock-free leases, `install-hooks`, `priority` + `--coalesce-key` batching, stdlib `search`/`gc`, and bounded `events.jsonl` + `tail`).
+## [2026-11-24] ingest | Roadmap Triage (`#13`–`#15` `v0.2.0`, `#16` Hold, `#12` `wontfix`) & Non-Goal Guardrails
+- Added `§4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)` to `pages/open-source-landscape.md` documenting why `aim-mailbox` rejects SQLite/FTS5 WAL storage (`9P`/NTFS locks), always-on socket daemons / PTY wrappers, startup MCP / subcommand bloat, and brittle path-glob leases when `git worktree`s already isolate edits.
+- Triaged roadmap issues: `#13` (`install-hooks`), `#14` (`priority` + `--coalesce-key`), and slimmed `#15` (`inbox` search filters + `gc`) scoped for `v0.2.0`; `#16` (`events.jsonl` write-only, no `tail` CLI) placed on hold pending `aim-office`; `#12` (advisory file leases) closed `wontfix` (YAGNI).
 
 ## [2026-11-23] ingest | Resolved Audit Issues `#3`–`#10` (Security, Atomicity, Dispatcher & Driver Hardening)
 - Closed all 8 open issues (`#3`, `#4`, `#5`, `#6`, `#7`, `#8`, `#9`, `#10`) via isolated GitOps worktrees, moving all 10 project board items to `Done` and pruning stale `origin/archive-fix/*` branches.

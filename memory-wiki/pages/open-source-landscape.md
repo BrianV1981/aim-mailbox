@@ -33,14 +33,17 @@ A late-2026 landscape audit of open-source local inter-agent mail and relay syst
 ---
 
 ## 4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)
-When borrowing ideas from competing orchestrators (advisory leases, turn hooks, priority batching, thread search/GC, and `events.jsonl` telemetry), contributors **MUST reject** these specific competitor pitfalls that violate `aim-mailbox`'s core invariants:
+When borrowing ideas from competing orchestrators (turn hooks, priority batching, inbox filtering/GC, and optional `events.jsonl` telemetry — tracked in `#13`–`#16`), contributors **MUST reject** these specific competitor pitfalls that violate `aim-mailbox`'s core invariants:
 
 1. **No SQLite or FTS5 Databases (`hcom`, `mcp_agent_mail`, `agent-mail-cli`):**
    - **Pitfall:** SQLite WAL locks and shared-memory (`-shm`/`-wal`) files break or throw `database is locked` across native Windows 11 NTFS ↔ WSL2 `/mnt/c` (`9P`) shares.
-   - **Rule:** Keep state (`boxes/`, `agents.json`, `locks/`, future advisory `leases/`) and queries (`search`/`gc`) 100% pure-stdlib JSON / JSONL Maildir files using atomic `os.replace()`, `O_CREAT | O_EXCL` leases, and NTFS `winerror 5/32` retries.
+   - **Rule:** Keep state (`boxes/`, `agents.json`, `locks/`) and inbox queries (`inbox` filters / `gc`) 100% pure-stdlib JSON Maildir files using atomic `os.replace()` and NTFS `winerror 5/32` retries.
 2. **No Always-On Socket Daemons or Mandatory PTY Wrappers (`AgentWorkforce/relay`, `hcom`):**
    - **Pitfall:** Requiring a resident Unix-socket server (`relay.sock`) or wrapping every interactive agent inside a PTY proxy wastes idle RAM, reintroduces daemon lifecycle failures, breaks native Windows 11 Desktop/GUI workflows, and loses the stateless `pulse` model.
-   - **Rule:** Expose observability via passive append-only `events.jsonl` + read-only `tail` streams for external dashboards (`aim-office`), and wire turn-boundary hooks passively (`check --inject`) without wrapping interactive CLI processes.
-3. **No Heavy Startup MCP Tool Bloat (`mcp_agent_mail`):**
-   - **Pitfall:** Loading 30+ MCP tool schemas into every session consumes thousands of context tokens at startup just to read or send mail.
-   - **Rule:** Keep the primary surface as a ~50-token self-describing CLI (`aim-mail --help` / `describe --json`) with `0` runtime pip dependencies.
+   - **Rule:** When `aim-office` is ready (`#16`, currently on hold), emit only a passive bounded `events.jsonl` file with zero resident daemon or CLI `tail` protocol; wire turn-boundary hooks cleanly via `check --inject` (`#13`) without wrapping processes.
+3. **No Heavy Startup MCP Tool Bloat or Subcommand Creep (`mcp_agent_mail`):**
+   - **Pitfall:** Loading 30+ MCP tool schemas (or creeping `aim-mail` past ~15 subcommands) burns context tokens and erodes simplicity.
+   - **Rule:** Keep the primary surface as a compact, self-describing CLI (`aim-mail --help` / `describe --json`, extending `inbox` filters instead of adding `search`) with `0` runtime pip dependencies.
+4. **No Cross-OS Path-Glob Advisory File Leases While Worktrees Isolate Edits (`#12` Closed `wontfix`):**
+   - **Pitfall:** Recursive path/glob overlap matching across Linux symlinks and Windows case-insensitive paths adds brittle edge cases when `git worktree` isolation (`aim-gitops`) already prevents concurrent file overwrites.
+   - **Rule:** Do not implement `reserve`/`release` path-glob leases unless non-git collaborative workflows explicitly require flat key locks later.
