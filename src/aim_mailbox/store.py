@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 import uuid
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,29 @@ def validate_message_id(raw: str, *, allow_json_ext: bool = True) -> str:
         raise MailboxError(f"Unsafe message ID {raw!r}: path traversal characters are forbidden.")
     if not MESSAGE_ID_RE.match(cleaned):
         raise MailboxError(f"Invalid message ID {raw!r}.")
+    return cleaned
+
+
+def validate_session_id(raw: str) -> str:
+    """Validate a harness session/conversation ID, blocking leading '-' flag injection and whitespace/control chars."""
+    if not isinstance(raw, str):
+        raise MailboxError("Session ID must be a non-empty string.")
+    cleaned = raw.strip()
+    if not cleaned or cleaned.startswith("-"):
+        raise MailboxError(f"Invalid session ID {raw!r}: must be non-empty and cannot start with '-'.")
+    if any(ord(ch) < 32 or ord(ch) == 127 or ch.isspace() for ch in cleaned):
+        raise MailboxError(f"Invalid session ID {raw!r}: whitespace and control characters are forbidden.")
+    return cleaned
+
+
+def validate_http_url(raw: str) -> str:
+    """Validate an HTTP(S) base URL for HTTP wake drivers (blocking file:// and other schemes)."""
+    if not isinstance(raw, str):
+        raise MailboxError("HTTP URL must be a non-empty string.")
+    cleaned = raw.strip().rstrip("/")
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise MailboxError(f"Invalid HTTP URL {raw!r}: expected http:// or https:// with host.")
     return cleaned
 
 
@@ -320,11 +344,11 @@ class MailboxStore:
             if cwd is not None:
                 entry["cwd"] = cwd
             if session_id is not None:
-                entry["session_id"] = session_id
+                entry["session_id"] = validate_session_id(session_id)
             if tmux_session is not None:
                 entry["tmux_session"] = tmux_session
             if http_url is not None:
-                entry["http_url"] = http_url
+                entry["http_url"] = validate_http_url(http_url)
             if command is not None:
                 entry["command"] = list(command)
             if binary is not None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -14,7 +15,14 @@ from typing import Any
 import pytest
 
 from aim_mailbox.dispatcher import pulse_mailbox, watch_mailbox
-from aim_mailbox.drivers import build_tmux_doorbell, build_wake_prompt, install_agy_sidecar, uninstall_agy_sidecar
+from aim_mailbox.drivers import (
+    _resolve_agentapi_prefix,
+    build_tmux_doorbell,
+    build_wake_prompt,
+    install_agy_sidecar,
+    is_agy_session_idle,
+    uninstall_agy_sidecar,
+)
 from aim_mailbox.store import MailboxError, MailboxStore
 
 
@@ -188,7 +196,13 @@ def test_agy_desktop_sidecar_driver_and_installer(tmp_path: Path, monkeypatch: p
 
     inst = install_agy_sidecar(store.root, config_dir=cfg_dir, sidecar_id="aim-mailbox")
     assert inst["installed"] is True
-    assert (cfg_dir / "sidecars" / "aim-mailbox" / "sidecar.json").is_file()
+    sc_json = cfg_dir / "sidecars" / "aim-mailbox" / "sidecar.json"
+    assert sc_json.is_file()
+    sc_spec = json.loads(sc_json.read_text(encoding="utf-8"))
+    assert sc_spec["agent_permissions"]["access_grants"] == [
+        "command(agentapi send-message)",
+        "command(agentapi get-conversation-metadata)",
+    ]
     merged = json.loads((cfg_dir / "config.json").read_text(encoding="utf-8"))
     assert merged["plugins"]["keep-me"]["version"] == "1.0"
     assert merged["sidecars"]["existing/sc"]["projectId"] == "proj-1"
@@ -242,11 +256,61 @@ def test_opencode_http_driver_creates_session_and_posts_message(tmp_path: Path, 
         summary = pulse_mailbox(store)
         assert len(summary["dispatched"]) == 1
         assert [r["path"] for r in recorded] == ["/session", "/session/ses_live_42/message"]
+        assert recorded[1]["body"]["parts"] == [{"type": "text", "text": recorded[1]["body"]["parts"][0]["text"]}]
         expected_auth = "Basic " + base64.b64encode(b"admin:s3cr3t").decode("ascii")
         assert recorded[0]["auth"] == expected_auth
         assert recorded[1]["auth"] == expected_auth
         saved_agent = store.get_agent("oc-worker")
         assert saved_agent is not None and saved_agent["session_id"] == "ses_live_42"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_opencode_http_default_username_captures_http_error_and_persists_session_before_msg_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorded: list[dict[str, Any]] = []
+
+    class ErrorHandler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length).decode("utf-8")
+            recorded.append({"path": self.path, "auth": self.headers.get("Authorization"), "body": json.loads(raw)})
+            if self.path == "/session":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"id": "ses_keep_99"}).encode("utf-8"))
+            else:
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({"name": "BadRequest", "data": {"message": "bad parts"}}).encode("utf-8"))
+
+        def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ErrorHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.delenv("OPENCODE_SERVER_USERNAME", raising=False)
+        monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "pw")
+        store = MailboxStore(tmp_path / "mailbox")
+        store.register_agent("oc-err", driver="opencode-http", http_url=f"http://127.0.0.1:{port}")
+        store.send_envelope(from_agent="lead", to_agent="oc-err", body="trigger 400")
+
+        summary = pulse_mailbox(store)
+        assert len(summary["failed"]) == 1
+        assert "HTTP 400" in summary["failed"][0]["error"]
+        assert "BadRequest" in summary["failed"][0]["error"]
+        expected_auth = "Basic " + base64.b64encode(b"opencode:pw").decode("ascii")
+        assert recorded[0]["auth"] == expected_auth
+        # Session created before failing /message POST must be persisted to avoid orphan leaks on retry
+        saved = store.get_agent("oc-err")
+        assert saved is not None and saved["session_id"] == "ses_keep_99"
     finally:
         server.shutdown()
         server.server_close()
@@ -494,4 +558,65 @@ def test_woken_active_inbox_multi_message_tmux_command_and_swallowed_enter(tmp_p
     batch_data = json.loads(cmd_out.read_text(encoding="utf-8"))
     expected_ids = f"{cm1['id']},{cm2['id']}"
     assert batch_data == {"arg": expected_ids, "ids": expected_ids, "count": "2"}
+
+
+def test_agentapi_stale_wrapper_agy_idle_presence_lock_and_codex_session_extraction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. Stale agentapi wrapper pointing to deleted agy.real.*.old must fall back to healthy agy.real
+    fake_home = tmp_path / "home"
+    cli_bin = fake_home / ".gemini" / "antigravity-cli" / "bin"
+    cli_bin.mkdir(parents=True)
+    stale = cli_bin / "agentapi"
+    stale.write_text("#!/bin/sh\nexec \"/nonexistent/agy.real.123.old\" agentapi \"$@\"\n", encoding="utf-8")
+    local_bin = fake_home / ".local" / "bin"
+    local_bin.mkdir(parents=True)
+    healthy_real = local_bin / "agy.real"
+    healthy_real.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    assert _resolve_agentapi_prefix(home_dir=fake_home) == [str(healthy_real), "agentapi"]
+
+    # 2. presence/<uuid>.lock and DB lock contention must return False (not idle)
+    db_root = fake_home / ".gemini" / "antigravity-cli"
+    summary_db = db_root / "conversation_summaries.db"
+    conn = sqlite3.connect(str(summary_db))
+    conn.execute(
+        "CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, status TEXT, not_fully_idle INTEGER)"
+    )
+    conn.execute("INSERT INTO conversation_summaries VALUES ('sid-1', 'CASCADE_RUN_STATUS_IDLE', 0)")
+    conn.commit()
+    conn.close()
+    assert is_agy_session_idle("sid-1", summary_db=str(summary_db)) is True
+
+    presence = db_root / "presence"
+    presence.mkdir(parents=True)
+    (presence / "sid-1.lock").write_text("locked", encoding="utf-8")
+    assert is_agy_session_idle("sid-1", summary_db=str(summary_db)) is False
+    (presence / "sid-1.lock").unlink()
+
+    def raise_locked(*_args: Any, **_kwargs: Any) -> Any:
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(sqlite3, "connect", raise_locked)
+    assert is_agy_session_idle("sid-1", summary_db=str(summary_db)) is False
+    monkeypatch.undo()
+
+    # 3. codex-cli uses --json + --add-dir on first run and auto-saves thread_id
+    fake_codex = _make_fake_cli(
+        tmp_path,
+        "fake_codex",
+        (
+            "import json, sys\n"
+            "print(json.dumps({'type': 'thread.started', 'thread_id': 'th_codex_99', 'argv': sys.argv[1:]}))\n"
+        ),
+    )
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("codex-worker", driver="codex-cli", binary=str(fake_codex), cwd=str(tmp_path))
+    store.send_envelope(from_agent="lead", to_agent="codex-worker", body="run codex")
+    s_codex = pulse_mailbox(store, agent_id="codex-worker")
+    assert len(s_codex["dispatched"]) == 1
+    cmd_used = s_codex["dispatched"][0]["result"]["command"]
+    assert "--json" in cmd_used and "--add-dir" in cmd_used
+    saved_codex = store.get_agent("codex-worker")
+    assert saved_codex is not None and saved_codex["session_id"] == "th_codex_99"
 

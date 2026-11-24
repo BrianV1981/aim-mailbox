@@ -16,7 +16,9 @@ from aim_mailbox.store import (
     utc_iso,
     utc_now,
     validate_agent_id,
+    validate_http_url,
     validate_message_id,
+    validate_session_id,
 )
 
 
@@ -366,3 +368,20 @@ def test_idless_read_does_not_replay_done_or_crash_on_dead(tmp_path: Path) -> No
     read_rep = store.read_message("a")
     assert read_rep["id"] == rep["id"]
     assert read_rep["state"] == "done"
+
+
+def test_session_id_and_http_url_validation(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+    for bad_sid in ("", "-flag", "--exec", "bad sid", "bad\nsid"):
+        with pytest.raises(MailboxError):
+            validate_session_id(bad_sid)
+        with pytest.raises(MailboxError):
+            store.register_agent("w1", driver="agy-cli", session_id=bad_sid)
+
+    for bad_url in ("", "file:///etc/passwd", "ftp://example.com", "http://"):
+        with pytest.raises(MailboxError):
+            validate_http_url(bad_url)
+        with pytest.raises(MailboxError):
+            store.register_agent("w2", driver="opencode-http", http_url=bad_url)
+
+    assert validate_http_url("http://127.0.0.1:4096/") == "http://127.0.0.1:4096"

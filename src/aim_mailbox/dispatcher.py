@@ -101,7 +101,18 @@ def pulse_mailbox(
                 if not claimed:
                     continue
 
-                res = dispatch_wake(cfg, claimed, mailbox_dir=store.root, dry_run=False, timeout=timeout)
+                def _persist_sid(new_sid: str) -> None:
+                    if not cfg.get("session_id"):
+                        store.register_agent(aid, session_id=new_sid)
+
+                res = dispatch_wake(
+                    cfg,
+                    claimed,
+                    mailbox_dir=store.root,
+                    dry_run=False,
+                    timeout=timeout,
+                    on_session_created=_persist_sid,
+                )
                 status = res.get("status")
 
                 if status == "DELIVERED":

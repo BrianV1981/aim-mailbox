@@ -4,6 +4,7 @@ import base64
 import http.client
 import json
 import os
+import platform
 import re
 import shutil
 import sqlite3
@@ -11,11 +12,20 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from .store import MailboxError, utc_iso, validate_agent_id, validate_message_id, write_json_atomic
+from .store import (
+    MailboxError,
+    utc_iso,
+    validate_agent_id,
+    validate_http_url,
+    validate_message_id,
+    validate_session_id,
+    write_json_atomic,
+)
 
 DRIVER_NAMES = (
     "none",
@@ -71,34 +81,63 @@ def build_tmux_doorbell(
 
 
 def is_agy_session_idle(session_id: str, summary_db: str | None = None, home_dir: Path | None = None) -> bool:
+    clean_sid = validate_session_id(session_id)
+    home = home_dir or Path.home()
     candidates: list[Path] = []
+    presence_dirs: list[Path] = []
     if summary_db:
-        candidates.append(Path(summary_db).expanduser())
+        db_p = Path(summary_db).expanduser()
+        candidates.append(db_p)
+        presence_dirs.append(db_p.parent / "presence")
     else:
-        home = home_dir or Path.home()
-        candidates.extend(
-            [
-                home / ".gemini" / "antigravity-cli" / "conversation_summaries.db",
-                home / ".gemini" / "antigravity" / "conversation_summaries.db",
-            ]
-        )
+        for base in (home / ".gemini" / "antigravity-cli", home / ".gemini" / "antigravity"):
+            candidates.append(base / "conversation_summaries.db")
+            presence_dirs.append(base / "presence")
+
+    for p_dir in presence_dirs:
+        if (p_dir / f"{clean_sid}.lock").exists():
+            return False
 
     for db_path in candidates:
         if not db_path.is_file():
             continue
         try:
-            conn = sqlite3.connect(f"file:{db_path.resolve().as_posix()}?mode=ro", uri=True, timeout=3.0)
-            row = conn.execute(
-                "SELECT status, not_fully_idle FROM conversation_summaries WHERE conversation_id = ?",
-                (session_id,),
-            ).fetchone()
-            conn.close()
+            conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=3.0)
+            try:
+                row = conn.execute(
+                    "SELECT status, not_fully_idle FROM conversation_summaries WHERE conversation_id = ?",
+                    (clean_sid,),
+                ).fetchone()
+            finally:
+                conn.close()
             if row is not None:
                 status_val = str(row[0] or "")
                 busy_flag = int(row[1] or 0)
                 return status_val == "CASCADE_RUN_STATUS_IDLE" and busy_flag == 0
+        except sqlite3.OperationalError:
+            return False
         except sqlite3.Error:
             continue
+    return True
+
+
+def _is_healthy_agentapi_wrapper(path: Path) -> bool:
+    if not path.is_file():
+        return False
+    if path.suffix.lower() in (".exe", ".bat", ".cmd"):
+        return True
+    try:
+        head = path.read_bytes()[:512]
+    except OSError:
+        return False
+    if not head.startswith(b"#!"):
+        return True
+    text = head.decode("utf-8", errors="ignore")
+    m = re.search(r"""exec\s+["']?([^"'\s]+)["']?""", text)
+    if m:
+        target = Path(m.group(1))
+        if target.is_absolute() and not target.is_file():
+            return False
     return True
 
 
@@ -106,7 +145,9 @@ def _resolve_agentapi_prefix(binary_override: str | None = None, home_dir: Path 
     if binary_override:
         if binary_override.lower().endswith("language_server.exe") or binary_override.endswith("agy.real"):
             return [binary_override, "agentapi"]
-        return [binary_override]
+        ov_path = Path(binary_override)
+        if not ov_path.is_file() or _is_healthy_agentapi_wrapper(ov_path):
+            return [binary_override]
 
     home = home_dir or Path.home()
     win_ls = (
@@ -123,16 +164,27 @@ def _resolve_agentapi_prefix(binary_override: str | None = None, home_dir: Path 
         return [str(win_ls), "agentapi"]
 
     which_bin = shutil.which("agentapi")
-    if which_bin and not which_bin.lower().endswith(".bat"):
+    if which_bin and not which_bin.lower().endswith((".bat", ".cmd")) and _is_healthy_agentapi_wrapper(Path(which_bin)):
         return [which_bin]
 
     for cand in (
-        home / ".gemini" / "antigravity" / "bin" / "agentapi.bat",
+        home / ".gemini" / "antigravity" / "bin" / "agentapi.exe",
         home / ".gemini" / "antigravity" / "bin" / "agentapi",
         home / ".gemini" / "antigravity-cli" / "bin" / "agentapi",
     ):
-        if cand.is_file():
+        if cand.is_file() and _is_healthy_agentapi_wrapper(cand):
             return [str(cand)]
+
+    for agy_real in (
+        home / ".local" / "bin" / "agy.real",
+        Path(shutil.which("agy.real")) if shutil.which("agy.real") else None,
+    ):
+        if agy_real is not None and agy_real.is_file():
+            return [str(agy_real), "agentapi"]
+
+    bat_cand = home / ".gemini" / "antigravity" / "bin" / "agentapi.bat"
+    if bat_cand.is_file():
+        return [str(bat_cand)]
     return [which_bin or "agentapi"]
 
 
@@ -166,6 +218,24 @@ def _coerce_output_text(val: Any) -> str:
     return str(val)
 
 
+def _extract_codex_session_id(raw: str) -> str | None:
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        for key in ("thread_id", "session_id", "conversation_id"):
+            val = obj.get(key)
+            if isinstance(val, str) and val.strip():
+                return validate_session_id(val)
+    return None
+
+
 def dispatch_wake(
     agent_cfg: dict[str, Any],
     envelopes: list[dict[str, Any]],
@@ -173,6 +243,7 @@ def dispatch_wake(
     mailbox_dir: Path,
     dry_run: bool = False,
     timeout: float = 300.0,
+    on_session_created: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     driver = str(agent_cfg.get("driver") or "none").strip()
     if driver not in DRIVER_NAMES:
@@ -186,6 +257,7 @@ def dispatch_wake(
             mailbox_dir=mailbox_dir,
             dry_run=dry_run,
             timeout=timeout,
+            on_session_created=on_session_created,
         )
     except subprocess.TimeoutExpired as exc:
         cmd = exc.cmd if isinstance(exc.cmd, list) else [str(exc.cmd)]
@@ -228,12 +300,13 @@ def _dispatch_wake_inner(
     mailbox_dir: Path,
     dry_run: bool = False,
     timeout: float = 300.0,
+    on_session_created: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-
-    agent_id = str(agent_cfg["agent_id"])
+    agent_id = validate_agent_id(str(agent_cfg["agent_id"]))
     prompt = build_wake_prompt(agent_id, envelopes, mailbox_dir)
     cwd = agent_cfg.get("cwd") or None
-    session_id = str(agent_cfg.get("session_id") or "").strip() or None
+    raw_sid = str(agent_cfg.get("session_id") or "").strip()
+    session_id = validate_session_id(raw_sid) if raw_sid else None
 
     if driver == "none":
         return {
@@ -323,20 +396,21 @@ def _dispatch_wake_inner(
         }
 
     if driver == "opencode-http":
-        base_url = str(agent_cfg.get("http_url") or "http://127.0.0.1:4096").rstrip("/")
+        base_url = validate_http_url(str(agent_cfg.get("http_url") or "http://127.0.0.1:4096"))
         headers = {"Content-Type": "application/json"}
-        user = os.environ.get("OPENCODE_SERVER_USERNAME")
         pwd = os.environ.get("OPENCODE_SERVER_PASSWORD")
-        if user and pwd is not None:
+        if pwd is not None:
+            user = os.environ.get("OPENCODE_SERVER_USERNAME") or "opencode"
             tok = base64.b64encode(f"{user}:{pwd}".encode("utf-8")).decode("ascii")
             headers["Authorization"] = f"Basic {tok}"
 
         if dry_run:
-            target_ep = f"{base_url}/session/{session_id or '<auto>'}/message"
+            sid_seg = urllib.parse.quote(session_id, safe="") if session_id else "<auto>"
+            target_ep = f"{base_url}/session/{sid_seg}/message"
             return {"status": "DRY_RUN", "driver": driver, "command": [target_ep], "delivered_at": utc_iso()}
 
+        active_sid = session_id
         try:
-            active_sid = session_id
             if not active_sid:
                 create_req = urllib.request.Request(
                     f"{base_url}/session",
@@ -346,8 +420,8 @@ def _dispatch_wake_inner(
                 )
                 with urllib.request.urlopen(create_req, timeout=min(15.0, timeout)) as resp:
                     created = json.loads(resp.read().decode("utf-8"))
-                    active_sid = str(created.get("id") or "").strip()
-                if not active_sid:
+                    raw_created_sid = str(created.get("id") or "").strip()
+                if not raw_created_sid:
                     return {
                         "status": "FAILED",
                         "driver": driver,
@@ -355,11 +429,16 @@ def _dispatch_wake_inner(
                         "stderr": "OpenCode POST /session did not return a session 'id'.",
                         "delivered_at": utc_iso(),
                     }
+                active_sid = validate_session_id(raw_created_sid)
+                if on_session_created is not None:
+                    on_session_created(active_sid)
 
-            msg_url = f"{base_url}/session/{active_sid}/message"
+            encoded_sid = urllib.parse.quote(active_sid, safe="")
+            msg_url = f"{base_url}/session/{encoded_sid}/message"
+            msg_payload = {"parts": [{"type": "text", "text": prompt}]}
             msg_req = urllib.request.Request(
                 msg_url,
-                data=json.dumps({"prompt": prompt}).encode("utf-8"),
+                data=json.dumps(msg_payload).encode("utf-8"),
                 headers=headers,
                 method="POST",
             )
@@ -376,6 +455,22 @@ def _dispatch_wake_inner(
                 "session_id": active_sid,
                 "delivered_at": utc_iso(),
             }
+        except urllib.error.HTTPError as exc:
+            err_body = ""
+            try:
+                err_body = exc.read().decode("utf-8", errors="replace")
+            except OSError:
+                pass
+            return {
+                "status": "FAILED",
+                "driver": driver,
+                "command": [base_url],
+                "returncode": exc.code or 1,
+                "stdout": err_body,
+                "stderr": f"HTTP {exc.code}: {err_body or exc.reason}",
+                "session_id": active_sid,
+                "delivered_at": utc_iso(),
+            }
         except (urllib.error.URLError, OSError, ValueError) as exc:
             return {
                 "status": "FAILED",
@@ -384,6 +479,7 @@ def _dispatch_wake_inner(
                 "returncode": 1,
                 "stdout": "",
                 "stderr": str(exc),
+                "session_id": active_sid,
                 "delivered_at": utc_iso(),
             }
 
@@ -419,9 +515,9 @@ def _dispatch_wake_inner(
     if driver == "codex-cli":
         codex_bin = agent_cfg.get("binary") or shutil.which("codex") or "codex"
         if session_id:
-            cmd = [str(codex_bin), "exec", "resume", session_id, prompt]
+            cmd = [str(codex_bin), "exec", "resume", "--json", session_id, prompt]
         else:
-            cmd = [str(codex_bin), "exec", prompt]
+            cmd = [str(codex_bin), "exec", "--json", "--add-dir", str(mailbox_dir), prompt]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
         res = subprocess.run(
@@ -432,6 +528,7 @@ def _dispatch_wake_inner(
             text=True,
             timeout=timeout,
         )
+        discovered_sid = _extract_codex_session_id(res.stdout) or session_id
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
@@ -439,6 +536,7 @@ def _dispatch_wake_inner(
             "returncode": res.returncode,
             "stdout": res.stdout,
             "stderr": res.stderr,
+            "session_id": discovered_sid,
             "delivered_at": utc_iso(),
         }
 
@@ -632,8 +730,8 @@ def install_agy_sidecar(
         "description": "Zero-LLM Maildir watcher delivering inbound agent mail via agentapi send-message",
         "agent_permissions": {
             "access_grants": [
-                "agentapi send-message",
-                "agentapi get-conversation-metadata",
+                "command(agentapi send-message)",
+                "command(agentapi get-conversation-metadata)",
             ]
         },
     }
@@ -645,13 +743,20 @@ def install_agy_sidecar(
         cfg = json.loads(config_json_path.read_text(encoding="utf-8"))
 
     sidecars_map = cfg.setdefault("sidecars", {})
-    existing_entry = dict(sidecars_map.get(sidecar_id) or {})
+    existing_entry = dict(sidecars_map.get(clean_sidecar_id) or {})
     existing_entry["enabled"] = True
     existing_entry.setdefault("schemaVersion", 1)
-    sidecars_map[sidecar_id] = existing_entry
+    sidecars_map[clean_sidecar_id] = existing_entry
     write_json_atomic(config_json_path, cfg)
 
-    return {
+    warnings: list[str] = []
+    is_wsl = "microsoft" in platform.release().lower() or bool(os.environ.get("WSL_DISTRO_NAME"))
+    if is_wsl and config_dir is None and python_exe is None:
+        warnings.append(
+            "Running under WSL without --config-dir/--python wrote WSL paths that native Windows Antigravity.exe cannot execute directly."
+        )
+
+    out: dict[str, Any] = {
         "installed": True,
         "sidecar_id": clean_sidecar_id,
         "sidecar_dir": str(sidecar_dir),
@@ -659,6 +764,9 @@ def install_agy_sidecar(
         "mailbox_dir": str(mailbox_dir),
         "python": str(py_bin),
     }
+    if warnings:
+        out["warnings"] = warnings
+    return out
 
 
 def uninstall_agy_sidecar(

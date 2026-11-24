@@ -288,6 +288,7 @@ def cmd_install_agy_sidecar(args: argparse.Namespace) -> int:
             f"[OK] Installed & enabled Antigravity Sidecar '{res['sidecar_id']}'",
             f"     Sidecar dir: {res['sidecar_dir']}",
             f"     Mailbox dir: {res['mailbox_dir']}",
+            *(f"[WARN] {w}" for w in res.get("warnings", [])),
         ],
     )
     return 0
