@@ -1,5 +1,12 @@
 # Memory Log
 
+## [2026-11-24] ingest | Shipped `aim-mailbox` `v0.1.2` (`#11`) & `aim-communicate` CI Hardening (`aim-skill-library#26`, `#27`)
+- Closed `BrianV1981/aim-mailbox#11` and tagged `v0.1.2` (`26114ff`, `CI` `45436738254` + `gitleaks` `45436738233` green across `ubuntu-latest` & `windows-latest`, `30/30` local `pytest`):
+  - Separated `tmux` `session_target` (`=name`) for `has-session` from `pane_target` (`=name:`) for `paste-buffer`/`send-keys`/`capture-pane` in `src/aim_mailbox/drivers.py`.
+  - Added UTF-8 subprocess capture decoding (`_run_capture`), Windows shebang wrapper rejection in `_is_healthy_agentapi_wrapper()`, Windows NTFS delete-pending `PermissionError` retries in `store.py` lock acquisition, and `python -X utf8` in `_make_fake_cli`.
+  - Added real `tmux` integration test using `TMUX` env unset + `TMUX_TMPDIR` + `socket_path` verification prior to `kill-server`, and synced `agy-cli` opt-in `--allow-skip-permissions` docs and `open-source-landscape.md` (`hcom`, `amux`).
+- Closed `BrianV1981/aim-skill-library#26` and `#27` (`PR #28`–`#30`, `cbe08f2`, `CI` `45437345337` + `gitleaks` `45437345260` green, `18/18` local `unittest`), hardening `tmux_send.sh` (exact `=session:` targeting, occurrence-delta verification, `umask 077` + `mktemp` + `trap`, `AIM_DND_SESSIONS`) and adding Linux+Windows CI with git-tracked skill discovery.
+
 ## [2026-11-24] ingest | Roadmap Triage (`#13`–`#15` `v0.2.0`, `#16` Hold, `#12` `wontfix`) & Non-Goal Guardrails
 - Added `§4. Architectural Anti-Patterns & Explicit Non-Goals (Do Not Adopt)` to `pages/open-source-landscape.md` documenting why `aim-mailbox` rejects SQLite/FTS5 WAL storage (`9P`/NTFS locks), always-on socket daemons / PTY wrappers, startup MCP / subcommand bloat, and brittle path-glob leases when `git worktree`s already isolate edits.
 - Triaged roadmap issues: `#13` (`install-hooks`), `#14` (`priority` + `--coalesce-key`), and slimmed `#15` (`inbox` search filters + `gc`) scoped for `v0.2.0`; `#16` (`events.jsonl` write-only, no `tail` CLI) placed on hold pending `aim-office`; `#12` (advisory file leases) closed `wontfix` (YAGNI).
