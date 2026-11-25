@@ -582,7 +582,27 @@ class MailboxStore:
         data["id"] = canonical_id
         return data
 
-    def list_inbox(self, agent_id: str, state: str = "unread") -> list[dict[str, Any]]:
+    def _envelope_timestamp(self, data: dict[str, Any], path: Path, *, primary_keys: tuple[str, ...] = ("created_at",)) -> dt.datetime:
+        for key in (*primary_keys, "created_at", "acked_at", "quarantined_at", "claimed_at"):
+            raw = data.get(key)
+            if raw:
+                try:
+                    return parse_utc_iso(str(raw))
+                except ValueError:
+                    continue
+        return dt.datetime.fromtimestamp(path.stat().st_mtime, tz=dt.timezone.utc)
+
+    def list_inbox(
+        self,
+        agent_id: str,
+        state: str = "unread",
+        *,
+        from_agent: str | None = None,
+        thread_id: str | None = None,
+        query: str | None = None,
+        since: str | None = None,
+        limit: int | None = None,
+    ) -> list[dict[str, Any]]:
         aid = validate_agent_id(agent_id)
         if state == "all":
             states: tuple[str, ...] = BOX_STATES
@@ -594,6 +614,32 @@ class MailboxStore:
             raise MailboxError(
                 f"Unsupported inbox state {state!r}; choose from {', '.join((*BOX_STATES, 'active', 'all'))}."
             )
+
+        from_filter = validate_agent_id(from_agent) if from_agent is not None else None
+        thread_filter: str | None = None
+        if thread_id is not None:
+            thread_filter = thread_id.strip()
+            if not thread_filter:
+                raise MailboxError("Filter --thread-id must be non-empty.")
+
+        query_filter: str | None = None
+        if query is not None:
+            query_filter = query.strip().lower()
+            if not query_filter:
+                raise MailboxError("Filter --query must be non-empty.")
+
+        since_dt: dt.datetime | None = None
+        if since is not None:
+            try:
+                since_dt = parse_utc_iso(since)
+            except ValueError as exc:
+                raise MailboxError(f"Invalid --since ISO timestamp {since!r}: {exc}") from exc
+
+        limit_val: int | None = None
+        if limit is not None:
+            limit_val = int(limit)
+            if limit_val <= 0:
+                raise MailboxError("Filter --limit must be >= 1.")
 
         box = self.boxes_dir / aid
         if not box.is_dir():
@@ -607,12 +653,157 @@ class MailboxStore:
             for p in sorted(st_dir.glob("*.json")):
                 try:
                     data = self._load_envelope_file(p, st_dir)
+                    if from_filter is not None and str(data.get("from", "")).lower() != from_filter:
+                        continue
+                    if thread_filter is not None and str(data.get("thread_id", "")) != thread_filter:
+                        continue
+                    if since_dt is not None and self._envelope_timestamp(data, p) < since_dt:
+                        continue
+                    if query_filter is not None:
+                        haystack = "\n".join(
+                            [
+                                str(data.get("id", "")),
+                                str(data.get("thread_id", "")),
+                                str(data.get("from", "")),
+                                str(data.get("to", "")),
+                                str(data.get("reply_to", "")),
+                                str(data.get("subject", "")),
+                                str(data.get("body", "")),
+                                " ".join(str(r) for r in (data.get("refs") or [])),
+                            ]
+                        ).lower()
+                        if query_filter not in haystack:
+                            continue
                     data["state"] = st
                     results.append(data)
                 except (OSError, json.JSONDecodeError, MailboxError):
                     continue
         results.sort(key=lambda d: str(d.get("id", "")))
+        if limit_val is not None:
+            results = results[:limit_val]
         return results
+
+    def gc_mailbox(
+        self,
+        *,
+        agent_id: str | None = None,
+        done_days: float = 14,
+        dead_days: float = 30,
+        dry_run: bool = False,
+        archive_dir: str | Path | None = None,
+        now: dt.datetime | None = None,
+    ) -> dict[str, Any]:
+        """Prune or archive aged terminal envelopes from done/ and dead/ while never touching unread/ or claimed/."""
+        if done_days < 0 or dead_days < 0:
+            raise MailboxError("Retention days (--done-days, --dead-days) must be >= 0.")
+
+        archive_root: Path | None = None
+        if archive_dir is not None:
+            archive_root = Path(archive_dir).expanduser().resolve()
+            resolved_root = self.root.resolve()
+            resolved_boxes = self.boxes_dir.resolve()
+            resolved_locks = self.locks_dir.resolve()
+            if (
+                archive_root == resolved_root
+                or archive_root.is_relative_to(resolved_boxes)
+                or archive_root.is_relative_to(resolved_locks)
+            ):
+                raise MailboxError(
+                    f"Unsafe archive directory {archive_dir!r}: cannot overlap mailbox root, boxes/, or locks/."
+                )
+
+        target_agents: list[str] = []
+        if agent_id is not None:
+            aid = validate_agent_id(agent_id)
+            if (self.boxes_dir / aid).is_dir():
+                target_agents.append(aid)
+        elif self.boxes_dir.is_dir():
+            for box_dir in sorted(self.boxes_dir.iterdir()):
+                if not box_dir.is_dir():
+                    continue
+                try:
+                    aid = validate_agent_id(box_dir.name)
+                except MailboxError:
+                    continue
+                target_agents.append(aid)
+
+        ref_now = now or utc_now()
+        cutoffs = {
+            "done": ref_now - dt.timedelta(days=float(done_days)),
+            "dead": ref_now - dt.timedelta(days=float(dead_days)),
+        }
+        primary_ts_keys = {
+            "done": ("acked_at",),
+            "dead": ("quarantined_at",),
+        }
+
+        items: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        by_state = {"done": 0, "dead": 0}
+
+        for aid in target_agents:
+            box = self.boxes_dir / aid
+            for st in ("done", "dead"):
+                st_dir = box / st
+                if not st_dir.is_dir():
+                    continue
+                cutoff = cutoffs[st]
+                for p in sorted(st_dir.glob("*.json")):
+                    try:
+                        data = self._load_envelope_file(p, st_dir)
+                    except (OSError, json.JSONDecodeError, MailboxError) as exc:
+                        errors.append(
+                            {
+                                "agent_id": aid,
+                                "state": st,
+                                "file": p.name,
+                                "error": str(exc),
+                            }
+                        )
+                        continue
+
+                    age_dt = self._envelope_timestamp(data, p, primary_keys=primary_ts_keys[st])
+                    if age_dt > cutoff:
+                        continue
+
+                    msg_id = str(data["id"])
+                    entry: dict[str, Any] = {
+                        "agent_id": aid,
+                        "state": st,
+                        "message_id": msg_id,
+                        "age_timestamp": utc_iso(age_dt),
+                    }
+                    if archive_root is not None:
+                        dst = archive_root / aid / st / f"{msg_id}.json"
+                        _ensure_within(dst, archive_root, "archive envelope")
+                        if not dry_run:
+                            archived_payload = dict(data)
+                            archived_payload["archived_at"] = utc_iso(ref_now)
+                            archived_payload["archived_from_state"] = st
+                            write_json_atomic(dst, archived_payload)
+                            _unlink_with_retry(p)
+                        entry["action"] = "would_archive" if dry_run else "archived"
+                        entry["archive_path"] = str(dst)
+                    else:
+                        if not dry_run:
+                            _unlink_with_retry(p)
+                        entry["action"] = "would_prune" if dry_run else "pruned"
+
+                    by_state[st] += 1
+                    items.append(entry)
+
+        return {
+            "dry_run": dry_run,
+            "done_days": done_days,
+            "dead_days": dead_days,
+            "archive_dir": str(archive_root) if archive_root is not None else None,
+            "checked_agents": len(target_agents),
+            "pruned_count": len(items),
+            "archived_count": len(items) if archive_root is not None else 0,
+            "by_state": by_state,
+            "items": items,
+            "errors": errors,
+        }
 
     def _find_envelope(
         self,

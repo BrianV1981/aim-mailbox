@@ -378,3 +378,66 @@ def test_no_hardcoded_host_paths_in_repo() -> None:
             if forbidden.search(txt):
                 offenders.append(str(fpath.relative_to(REPO_ROOT)))
     assert offenders == [], f"Hardcoded host user paths found in: {offenders}"
+
+
+def test_cli_inbox_filters_and_gc_e2e(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+    archive_dir = tmp_path / "gc_archive"
+
+    r1 = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "alice", "--to", "bob",
+        "--subject", "Deploy check", "--body", "Verify staging manifest",
+        "--thread-id", "thr_deploy", "--json",
+    )
+    assert r1.returncode == 0
+    m1 = json.loads(r1.stdout)
+
+    r2 = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "charlie", "--to", "bob",
+        "--subject", "Nightly report", "--body", "All metrics green",
+        "--thread-id", "thr_report", "--json",
+    )
+    assert r2.returncode == 0
+    m2 = json.loads(r2.stdout)
+
+    # Filter inbox via CLI flags
+    r_filt = _run_cli(
+        "inbox", "bob", "--mailbox-dir", mb,
+        "--state", "unread", "--from", "alice", "--thread-id", "thr_deploy",
+        "--query", "staging", "--limit", "1", "--json",
+    )
+    assert r_filt.returncode == 0
+    filt_data = json.loads(r_filt.stdout)
+    assert filt_data["count"] == 1
+    assert [m["id"] for m in filt_data["messages"]] == [m1["id"]]
+
+    # ACK m1 so it moves to done/, leave m2 in unread/
+    assert _run_cli("ack", "bob", m1["id"], "--mailbox-dir", mb).returncode == 0
+
+    # Dry-run gc with --done-days 0 reports m1 without removing it
+    r_gc_dry = _run_cli(
+        "gc", "--mailbox-dir", mb, "--agent", "bob",
+        "--done-days", "0", "--dry-run", "--archive-dir", str(archive_dir), "--json",
+    )
+    assert r_gc_dry.returncode == 0
+    dry_payload = json.loads(r_gc_dry.stdout)
+    assert dry_payload["dry_run"] is True
+    assert dry_payload["pruned_count"] == 1
+    assert not archive_dir.exists()
+
+    # Live gc archives m1 and leaves unread m2 untouched
+    r_gc = _run_cli(
+        "gc", "--mailbox-dir", mb, "--agent", "bob",
+        "--done-days", "0", "--archive-dir", str(archive_dir), "--json",
+    )
+    assert r_gc.returncode == 0
+    gc_payload = json.loads(r_gc.stdout)
+    assert gc_payload["archived_count"] == 1
+    assert (archive_dir / "bob" / "done" / f"{m1['id']}.json").is_file()
+
+    r_after = _run_cli("inbox", "bob", "--state", "all", "--mailbox-dir", mb, "--json")
+    assert r_after.returncode == 0
+    after_msgs = json.loads(r_after.stdout)["messages"]
+    assert [m["id"] for m in after_msgs] == [m2["id"]]

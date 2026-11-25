@@ -161,7 +161,15 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_inbox(args: argparse.Namespace) -> int:
     store = _resolve_store(args)
-    items = store.list_inbox(args.agent, state=args.state)
+    items = store.list_inbox(
+        args.agent,
+        state=args.state,
+        from_agent=args.from_agent,
+        thread_id=args.thread_id,
+        query=args.query,
+        since=args.since,
+        limit=args.limit,
+    )
     if args.json:
         _emit({"agent": args.agent, "state": args.state, "count": len(items), "messages": items}, True)
         return 0
@@ -171,6 +179,28 @@ def cmd_inbox(args: argparse.Namespace) -> int:
     for msg in items:
         sub = f" | {msg['subject']}" if msg.get("subject") else ""
         print(f"[{msg['state'].upper()}] {msg['id']} from:{msg['from']} reply_to:{msg.get('reply_to', msg['from'])}{sub}")
+    return 0
+
+
+def cmd_gc(args: argparse.Namespace) -> int:
+    store = _resolve_store(args)
+    res = store.gc_mailbox(
+        agent_id=args.agent,
+        done_days=args.done_days,
+        dead_days=args.dead_days,
+        dry_run=args.dry_run,
+        archive_dir=args.archive_dir,
+    )
+    mode = "DRY_RUN" if res["dry_run"] else ("ARCHIVED" if res["archive_dir"] else "PRUNED")
+    human = [
+        f"[GC:{mode}] checked={res['checked_agents']} count={res['pruned_count']} "
+        f"(done={res['by_state']['done']}, dead={res['by_state']['dead']})"
+    ]
+    if res["archive_dir"]:
+        human.append(f"  archive_dir={res['archive_dir']}")
+    if res["errors"]:
+        human.append(f"  errors={len(res['errors'])}")
+    _emit(res, args.json, human)
     return 0
 
 
@@ -355,6 +385,7 @@ COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "wait": cmd_wait,
     "pulse": cmd_pulse,
     "watch": cmd_watch,
+    "gc": cmd_gc,
     "install-agy-sidecar": cmd_install_agy_sidecar,
     "describe": cmd_describe,
 }
@@ -435,6 +466,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_inbox = sub.add_parser("inbox", parents=[common], help="List envelopes in an agent's mailbox")
     p_inbox.add_argument("agent", help="Target agent ID")
     p_inbox.add_argument("--state", choices=(*BOX_STATES, "active", "all"), default="unread", help="Envelope state filter")
+    p_inbox.add_argument("--from", dest="from_agent", default=None, help="Filter by sender agent ID")
+    p_inbox.add_argument("--thread-id", default=None, help="Filter by thread ID")
+    p_inbox.add_argument("--query", default=None, help="Case-insensitive substring search across subject/body/id/refs")
+    p_inbox.add_argument("--since", default=None, help="Filter envelopes created at or after ISO-8601 UTC timestamp")
+    p_inbox.add_argument("--limit", type=int, default=None, help="Maximum number of matching envelopes to return")
     p_inbox.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_read = sub.add_parser("read", parents=[common], help="Read a specific or oldest unread envelope")
@@ -487,6 +523,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=float, default=1.5, help="Poll interval in seconds (default: 1.5)")
     p_watch.add_argument("--max-cycles", type=int, default=None, help="Optional cycle limit (testing)")
     p_watch.add_argument("--timeout", type=float, default=300.0, help="Per-driver execution timeout in seconds")
+
+    p_gc = sub.add_parser("gc", parents=[common], help="Prune or archive aged terminal envelopes from done/ and dead/")
+    p_gc.add_argument("--agent", default=None, help="Limit retention GC to a single agent ID")
+    p_gc.add_argument("--done-days", type=int, default=14, help="Retention days for done/ envelopes (default: 14)")
+    p_gc.add_argument("--dead-days", type=int, default=30, help="Retention days for dead/ envelopes (default: 30)")
+    p_gc.add_argument("--dry-run", action="store_true", help="Report eligible envelopes without deleting or archiving")
+    p_gc.add_argument("--archive-dir", default=None, help="Archive aged envelopes to directory before unlinking")
+    p_gc.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_sidecar = sub.add_parser(
         "install-agy-sidecar",

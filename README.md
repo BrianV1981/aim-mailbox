@@ -101,7 +101,7 @@ aim-mail install-agy-sidecar --uninstall
 | `aim-mail register <agent> [...]` | Register, update, or `--unregister` an agent and wake driver in `agents.json` |
 | `aim-mail agents [--json]` | List registered logical agents and configured targets |
 | `aim-mail send --from <a1> --to <a2> --body "..."` | Atomically deliver a JSON envelope to `boxes/<to>/unread/` (optional `--wake`) |
-| `aim-mail inbox <agent> [--state ...]` | List envelopes (`unread`, `claimed`, `done`, `dead`, or `all`) |
+| `aim-mail inbox <agent> [--state ...]` | List/filter envelopes (`--state`, `--from`, `--thread-id`, `--query`, `--since`, `--limit`) |
 | `aim-mail read <agent> [id] [--claim] [--ack]` | Read a specific or oldest unread envelope |
 | `aim-mail reply <agent> <id> --body "..."` | Reply to `reply_to`, increment `hop_count`, and auto-ACK parent |
 | `aim-mail ack <agent> <id> [--note "..."]` | Move envelope to `done/` with completion timestamp |
@@ -109,6 +109,7 @@ aim-mail install-agy-sidecar --uninstall
 | `aim-mail wait <agent> [--thread-id ...]` | Block at `0` LLM cost until matching unread mail lands |
 | `aim-mail pulse [--agent ...] [--dry-run]` | Single-pass zero-LLM wake dispatcher for `cron` / Task Scheduler |
 | `aim-mail watch [--interval 1.5]` | Continuous zero-LLM Maildir watcher for Sidecars |
+| `aim-mail gc [--done-days 14] [--dead-days 30]` | Prune or `--archive-dir` aged terminal envelopes in `done/` and `dead/` |
 | `aim-mail install-agy-sidecar` | Non-destructively install or `--uninstall` the Antigravity Desktop Sidecar |
 | `aim-mail describe` | Output compact JSON schema of commands, states, and drivers |
 

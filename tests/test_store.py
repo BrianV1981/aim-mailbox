@@ -385,3 +385,113 @@ def test_session_id_and_http_url_validation(tmp_path: Path) -> None:
             store.register_agent("w2", driver="opencode-http", http_url=bad_url)
 
     assert validate_http_url("http://127.0.0.1:4096/") == "http://127.0.0.1:4096"
+
+
+def test_inbox_filters_and_gc_retention_safety(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+
+    m1 = store.send_envelope(
+        from_agent="alpha",
+        to_agent="worker",
+        subject="Schema migration",
+        body="Check v0.2 layout",
+        refs=["docs/schema.md"],
+        thread_id="thr_alpha",
+    )
+    m2 = store.send_envelope(
+        from_agent="beta",
+        to_agent="worker",
+        subject="Build status",
+        body="Green on Linux",
+        thread_id="thr_beta",
+    )
+    m3 = store.send_envelope(
+        from_agent="alpha",
+        to_agent="worker",
+        subject="Follow up",
+        body="Another message about schema",
+        thread_id="thr_alpha",
+        max_hops=3,
+    )
+
+    # Filter by --from (with '@' normalization), --thread-id, --query, --since, --limit
+    assert [m["id"] for m in store.list_inbox("worker", state="unread", from_agent="@Alpha")] == [m1["id"], m3["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="unread", thread_id="thr_beta")] == [m2["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="unread", query="DOCS/SCHEMA.MD")] == [m1["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="unread", query="schema", limit=1)] == [m1["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="unread", since=m2["created_at"])] == [m2["id"], m3["id"]]
+
+    with pytest.raises(MailboxError):
+        store.list_inbox("worker", limit=0)
+    with pytest.raises(MailboxError):
+        store.list_inbox("worker", since="not-a-timestamp")
+    with pytest.raises(MailboxError):
+        store.list_inbox("worker", query="   ")
+
+    # Setup retention states: unread/, claimed/, done/ (old + fresh), dead/ (old + fresh)
+    store.claim_envelope("worker", m2["id"])
+    old_done = store.ack_message("worker", m1["id"])
+    fresh_done_env = store.send_envelope(from_agent="alpha", to_agent="worker", body="fresh done")
+    store.ack_message("worker", fresh_done_env["id"])
+
+    old_dead_env = store.send_envelope(from_agent="alpha", to_agent="worker", body="old dead")
+    store.quarantine_message("worker", old_dead_env["id"], reason="STALE")
+    fresh_dead_env = store.send_envelope(from_agent="alpha", to_agent="worker", body="fresh dead")
+    store.quarantine_message("worker", fresh_dead_env["id"], reason="RECENT")
+
+    now = utc_now()
+    old_done_path = store.boxes_dir / "worker" / "done" / f"{old_done['id']}.json"
+    old_done_data = json.loads(old_done_path.read_text(encoding="utf-8"))
+    old_done_data["acked_at"] = utc_iso(now - dt.timedelta(days=20))
+    old_done_path.write_text(json.dumps(old_done_data), encoding="utf-8")
+
+    old_dead_path = store.boxes_dir / "worker" / "dead" / f"{old_dead_env['id']}.json"
+    old_dead_data = json.loads(old_dead_path.read_text(encoding="utf-8"))
+    old_dead_data["quarantined_at"] = utc_iso(now - dt.timedelta(days=45))
+    old_dead_path.write_text(json.dumps(old_dead_data), encoding="utf-8")
+
+    # Unsafe archive_dir overlapping mailbox root / boxes / locks must be rejected
+    for unsafe_dir in (store.root, store.boxes_dir, store.boxes_dir / "worker", store.locks_dir):
+        with pytest.raises(MailboxError, match="Unsafe archive directory"):
+            store.gc_mailbox(archive_dir=unsafe_dir)
+
+    with pytest.raises(MailboxError):
+        store.gc_mailbox(done_days=-1)
+
+    # Dry-run archive reports eligible done/ and dead/ without writing archive or deleting files
+    archive_dir = tmp_path / "archive_out"
+    dry = store.gc_mailbox(done_days=14, dead_days=30, dry_run=True, archive_dir=archive_dir, now=now)
+    assert dry["dry_run"] is True
+    assert dry["pruned_count"] == 2
+    assert dry["by_state"] == {"done": 1, "dead": 1}
+    assert {item["message_id"] for item in dry["items"]} == {old_done["id"], old_dead_env["id"]}
+    assert not archive_dir.exists()
+    assert old_done_path.is_file()
+    assert old_dead_path.is_file()
+
+    # Live archive moves aged done/ and dead/ safely and preserves unread/, claimed/, and fresh terminal envelopes
+    live = store.gc_mailbox(done_days=14, dead_days=30, dry_run=False, archive_dir=archive_dir, now=now)
+    assert live["dry_run"] is False
+    assert live["archived_count"] == 2
+    assert not old_done_path.exists()
+    assert not old_dead_path.exists()
+    assert (archive_dir / "worker" / "done" / f"{old_done['id']}.json").is_file()
+    assert (archive_dir / "worker" / "dead" / f"{old_dead_env['id']}.json").is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE((archive_dir / "worker" / "done" / f"{old_done['id']}.json").stat().st_mode) == 0o600
+
+    # Active unread/ and claimed/ plus fresh done/ and dead/ remain intact
+    assert [m["id"] for m in store.list_inbox("worker", state="unread")] == [m3["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="claimed")] == [m2["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="done")] == [fresh_done_env["id"]]
+    assert [m["id"] for m in store.list_inbox("worker", state="dead")] == [fresh_dead_env["id"]]
+
+    # Direct prune (without archive_dir) with done_days=0 deletes remaining done/ while preserving unread/claimed/dead
+    pruned = store.gc_mailbox(agent_id="worker", done_days=0, dead_days=30, now=now + dt.timedelta(seconds=1))
+    assert pruned["pruned_count"] == 1
+    assert pruned["archived_count"] == 0
+    assert pruned["by_state"] == {"done": 1, "dead": 0}
+    assert store.list_inbox("worker", state="done") == []
+    assert len(store.list_inbox("worker", state="unread")) == 1
+    assert len(store.list_inbox("worker", state="claimed")) == 1
+    assert len(store.list_inbox("worker", state="dead")) == 1
