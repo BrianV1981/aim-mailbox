@@ -441,3 +441,48 @@ def test_cli_inbox_filters_and_gc_e2e(tmp_path: Path) -> None:
     assert r_after.returncode == 0
     after_msgs = json.loads(r_after.stdout)["messages"]
     assert [m["id"] for m in after_msgs] == [m2["id"]]
+
+
+def test_cli_priority_coalesce_and_low_wake_fail_closed_e2e(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+    cmd_ok = json.dumps([sys.executable, "-c", "print('ok')"])
+    assert _run_cli("register", "worker", "--driver", "command", "--command-json", cmd_ok, "--mailbox-dir", mb).returncode == 0
+
+    # send --priority low --wake without --allow-deferred fails closed (rc=2)
+    r_low_fail = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "lead", "--to", "worker",
+        "--body", "low note 1", "--priority", "low", "--coalesce-key", "notes",
+        "--operator-approved", "--wake",
+    )
+    assert r_low_fail.returncode == 2
+    assert "LOW_PRIORITY_BATCH_WINDOW" in r_low_fail.stderr
+
+    # send --priority low --wake --allow-deferred exits 0 cleanly
+    r_low_ok = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "lead", "--to", "worker",
+        "--body", "low note 2", "--priority", "low", "--coalesce-key", "notes",
+        "--operator-approved", "--wake", "--allow-deferred", "--json",
+    )
+    assert r_low_ok.returncode == 0
+    low2 = json.loads(r_low_ok.stdout)
+    assert low2["priority"] == "low"
+    assert low2["coalesce_key"] == "notes"
+
+    # send --priority urgent --wake dispatches immediately
+    r_urg = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "lead", "--to", "worker",
+        "--body", "urgent halt", "--priority", "urgent",
+        "--operator-approved", "--wake", "--json",
+    )
+    assert r_urg.returncode == 0
+    urg = json.loads(r_urg.stdout)
+    assert urg["priority"] == "urgent"
+    assert len(urg["wake"]["dispatched"]) == 1
+
+    # inbox --priority filter works end-to-end
+    r_inb = _run_cli("inbox", "worker", "--state", "all", "--priority", "urgent", "--mailbox-dir", mb, "--json")
+    assert r_inb.returncode == 0
+    assert [m["id"] for m in json.loads(r_inb.stdout)["messages"]] == [urg["id"]]

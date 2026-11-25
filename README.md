@@ -100,8 +100,8 @@ aim-mail install-agy-sidecar --uninstall
 | :--- | :--- |
 | `aim-mail register <agent> [...]` | Register, update, or `--unregister` an agent and wake driver in `agents.json` |
 | `aim-mail agents [--json]` | List registered logical agents and configured targets |
-| `aim-mail send --from <a1> --to <a2> --body "..."` | Atomically deliver a JSON envelope to `boxes/<to>/unread/` (optional `--wake`) |
-| `aim-mail inbox <agent> [--state ...]` | List/filter envelopes (`--state`, `--from`, `--thread-id`, `--query`, `--since`, `--limit`) |
+| `aim-mail send --from <a1> --to <a2> --body "..."` | Atomically deliver a JSON envelope (`--priority urgent\|normal\|low`, `--coalesce-key`, `--wake`) |
+| `aim-mail inbox <agent> [--state ...]` | List/filter envelopes (`--state`, `--from`, `--thread-id`, `--priority`, `--query`, `--since`, `--limit`) |
 | `aim-mail read <agent> [id] [--claim] [--ack]` | Read a specific or oldest unread envelope |
 | `aim-mail reply <agent> <id> --body "..."` | Reply to `reply_to`, increment `hop_count`, and auto-ACK parent |
 | `aim-mail ack <agent> <id> [--note "..."]` | Move envelope to `done/` with completion timestamp |

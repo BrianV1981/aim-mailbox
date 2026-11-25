@@ -9,7 +9,7 @@ from typing import Any, Callable
 from . import __version__
 from .dispatcher import pulse_mailbox, watch_mailbox
 from .drivers import DRIVER_NAMES, install_agy_sidecar, uninstall_agy_sidecar
-from .store import BOX_STATES, MailboxError, MailboxStore
+from .store import BOX_STATES, PRIORITY_LEVELS, MailboxError, MailboxStore
 
 
 def _ensure_utf8_stdio() -> None:
@@ -138,6 +138,8 @@ def cmd_send(args: argparse.Namespace) -> int:
         max_hops=args.max_hops,
         ack_required=not args.no_ack_required,
         operator_approved=args.operator_approved,
+        priority=args.priority,
+        coalesce_key=args.coalesce_key,
     )
     wake_summary = None
     if args.wake:
@@ -148,7 +150,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         sent,
         args.json,
         [
-            f"[SENT] id={sent['id']} thread={sent['thread_id']} from={sent['from']} -> to={sent['to']}",
+            f"[SENT] id={sent['id']} thread={sent['thread_id']} priority={sent['priority']} from={sent['from']} -> to={sent['to']}",
             *(
                 [f"[WAKE] dispatched={len(wake_summary['dispatched'])} deferred={len(wake_summary['deferred'])} skipped={len(wake_summary['skipped'])} failed={len(wake_summary['failed'])}"]
                 if wake_summary
@@ -169,6 +171,7 @@ def cmd_inbox(args: argparse.Namespace) -> int:
         query=args.query,
         since=args.since,
         limit=args.limit,
+        priority=args.priority,
     )
     if args.json:
         _emit({"agent": args.agent, "state": args.state, "count": len(items), "messages": items}, True)
@@ -178,7 +181,9 @@ def cmd_inbox(args: argparse.Namespace) -> int:
         return 0
     for msg in items:
         sub = f" | {msg['subject']}" if msg.get("subject") else ""
-        print(f"[{msg['state'].upper()}] {msg['id']} from:{msg['from']} reply_to:{msg.get('reply_to', msg['from'])}{sub}")
+        prio = f" [{str(msg.get('priority', 'normal')).upper()}]" if msg.get("priority", "normal") != "normal" else ""
+        ck = f" coalesce={msg['coalesce_key']}" if msg.get("coalesce_key") else ""
+        print(f"[{msg['state'].upper()}]{prio} {msg['id']} from:{msg['from']} reply_to:{msg.get('reply_to', msg['from'])}{ck}{sub}")
     return 0
 
 
@@ -213,10 +218,15 @@ def cmd_read(args: argparse.Namespace) -> int:
     lines = [
         f"ID:        {msg['id']} [{msg['state'].upper()}]",
         f"Thread:    {msg['thread_id']} (hop {msg.get('hop_count', 0)}/{msg.get('max_hops', 1)})",
+        f"Priority:  {msg.get('priority', 'normal')}",
         f"From:      {msg['from']} (reply_to: {msg.get('reply_to', msg['from'])})",
         f"To:        {msg['to']}",
         f"Created:   {msg['created_at']}",
     ]
+    if msg.get("coalesce_key"):
+        lines.append(f"Coalesce:  {msg['coalesce_key']}")
+    if msg.get("coalesced_ids"):
+        lines.append(f"Coalesced: {', '.join(msg['coalesced_ids'])}")
     if msg.get("subject"):
         lines.append(f"Subject:   {msg['subject']}")
     if msg.get("refs"):
@@ -236,6 +246,8 @@ def cmd_reply(args: argparse.Namespace) -> int:
         refs=args.refs,
         ack_parent=not args.no_ack_parent,
         ack_required=args.ack_required,
+        priority=args.priority,
+        coalesce_key=args.coalesce_key,
     )
     wake_summary = None
     if args.wake:
@@ -305,6 +317,7 @@ def cmd_pulse(args: argparse.Namespace) -> int:
         agent_id=args.agent,
         dry_run=args.dry_run,
         timeout=args.timeout,
+        low_batch_window=args.low_batch_window,
     )
     _emit(
         summary,
@@ -325,6 +338,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
         interval=args.interval,
         max_cycles=args.max_cycles,
         timeout=args.timeout,
+        low_batch_window=args.low_batch_window,
     )
 
 
@@ -362,6 +376,7 @@ def cmd_describe(_args: argparse.Namespace) -> int:
         "version": __version__,
         "drivers": list(DRIVER_NAMES),
         "states": list(BOX_STATES),
+        "priorities": list(PRIORITY_LEVELS),
         "commands": sorted(COMMAND_HANDLERS.keys()),
         "env": {
             "AIM_MAILBOX_DIR": "Override default ~/.aim/mailbox root directory",
@@ -459,8 +474,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_send.add_argument("--max-hops", type=int, default=None, help="Max automated reply hops on thread (default: 1 or existing thread max)")
     p_send.add_argument("--no-ack-required", action="store_true", help="Mark message as informational (no ACK needed)")
     p_send.add_argument("--operator-approved", action="store_true", help="Record explicit Operator approval on envelope")
+    p_send.add_argument("--priority", choices=PRIORITY_LEVELS, default="normal", help="Envelope priority lane (urgent, normal, low; default: normal)")
+    p_send.add_argument("--coalesce-key", default=None, help="Optional key to coalesce duplicate unread wakes")
     p_send.add_argument("--wake", action="store_true", help="Immediately trigger a pulse dispatch for recipient")
-    p_send.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD as exit 0 on --wake")
+    p_send.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD/LOW_PRIORITY_BATCH_WINDOW as exit 0 on --wake")
     p_send.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_inbox = sub.add_parser("inbox", parents=[common], help="List envelopes in an agent's mailbox")
@@ -468,6 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_inbox.add_argument("--state", choices=(*BOX_STATES, "active", "all"), default="unread", help="Envelope state filter")
     p_inbox.add_argument("--from", dest="from_agent", default=None, help="Filter by sender agent ID")
     p_inbox.add_argument("--thread-id", default=None, help="Filter by thread ID")
+    p_inbox.add_argument("--priority", choices=PRIORITY_LEVELS, default=None, help="Filter by priority lane")
     p_inbox.add_argument("--query", default=None, help="Case-insensitive substring search across subject/body/id/refs")
     p_inbox.add_argument("--since", default=None, help="Filter envelopes created at or after ISO-8601 UTC timestamp")
     p_inbox.add_argument("--limit", type=int, default=None, help="Maximum number of matching envelopes to return")
@@ -488,8 +506,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_reply.add_argument("--ref", dest="refs", action="append", default=[], help="Referenced file path (repeatable)")
     p_reply.add_argument("--no-ack-parent", action="store_true", help="Do not automatically ACK parent message")
     p_reply.add_argument("--ack-required", action="store_true", help="Require recipient to ACK this reply")
+    p_reply.add_argument("--priority", choices=PRIORITY_LEVELS, default="normal", help="Reply priority lane (urgent, normal, low; default: normal)")
+    p_reply.add_argument("--coalesce-key", default=None, help="Optional key to coalesce duplicate unread reply wakes")
     p_reply.add_argument("--wake", action="store_true", help="Immediately trigger a pulse dispatch for reply recipient")
-    p_reply.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD as exit 0 on --wake")
+    p_reply.add_argument("--allow-deferred", action="store_true", help="Treat BUSY_DEFERRED/AGENT_LOCK_HELD/LOW_PRIORITY_BATCH_WINDOW as exit 0 on --wake")
     p_reply.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_ack = sub.add_parser("ack", parents=[common], help="Acknowledge an envelope and move it to done/")
@@ -516,6 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_pulse.add_argument("--agent", default=None, help="Dispatch only for a single agent ID")
     p_pulse.add_argument("--dry-run", action="store_true", help="Inspect planned wake commands without executing")
     p_pulse.add_argument("--timeout", type=float, default=300.0, help="Per-driver execution timeout in seconds")
+    p_pulse.add_argument("--low-batch-window", type=float, default=30.0, help="Defer low-priority mail until oldest waits N seconds (default: 30; 0 disables)")
     p_pulse.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_watch = sub.add_parser("watch", parents=[common], help="Continuous zero-LLM Maildir watch loop (for Sidecars)")
@@ -523,6 +544,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_watch.add_argument("--interval", type=float, default=1.5, help="Poll interval in seconds (default: 1.5)")
     p_watch.add_argument("--max-cycles", type=int, default=None, help="Optional cycle limit (testing)")
     p_watch.add_argument("--timeout", type=float, default=300.0, help="Per-driver execution timeout in seconds")
+    p_watch.add_argument("--low-batch-window", type=float, default=30.0, help="Defer low-priority mail until oldest waits N seconds (default: 30; 0 disables)")
 
     p_gc = sub.add_parser("gc", parents=[common], help="Prune or archive aged terminal envelopes from done/ and dead/")
     p_gc.add_argument("--agent", default=None, help="Limit retention GC to a single agent ID")

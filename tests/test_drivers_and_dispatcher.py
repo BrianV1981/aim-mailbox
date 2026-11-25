@@ -743,3 +743,106 @@ def test_is_healthy_agentapi_wrapper_rejects_shebang_on_windows_and_posix_abs_pa
     monkeypatch.setattr(os, "name", "posix")
     assert _is_healthy_agentapi_wrapper(shebang_shim) is False
 
+
+def test_priority_lanes_coalesce_key_and_safety_gates(tmp_path: Path) -> None:
+    import datetime as dt
+    from aim_mailbox.store import utc_now
+
+    recorded_cmds: Path = tmp_path / "wake_batches.jsonl"
+    fake_cli = _make_fake_cli(
+        tmp_path,
+        "fake_prio",
+        (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            f"Path({str(recorded_cmds)!r}).open('a', encoding='utf-8').write(json.dumps({{'ids': os.environ['AIM_MAIL_MESSAGE_IDS'], 'prompt': os.environ['AIM_MAIL_WAKE_PROMPT']}}) + '\\n')\n"
+        ),
+    )
+
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("worker", driver="command", command=[str(fake_cli)])
+
+    # 1. Urgent must NEVER bypass operator_approved or max_hops
+    unapproved_urgent = store.send_envelope(
+        from_agent="rogue",
+        to_agent="worker",
+        body="unapproved urgent",
+        priority="urgent",
+        operator_approved=False,
+    )
+    overhop_urgent = store.send_envelope(
+        from_agent="rogue",
+        to_agent="worker",
+        body="overhop urgent",
+        priority="urgent",
+        hop_count=2,
+        max_hops=1,
+        operator_approved=True,
+    )
+    s_gate = pulse_mailbox(store, agent_id="worker")
+    assert s_gate["dispatched"] == []
+    assert any(d["message_id"] == unapproved_urgent["id"] and d["reason"] == "OPERATOR_APPROVAL_REQUIRED" for d in s_gate["deferred"])
+    assert any(q["message_id"] == overhop_urgent["id"] and q["reason"] == "MAX_HOPS_EXCEEDED" for q in s_gate["quarantined"])
+    # Clean out unapproved urgent so next phase tests clean delivery
+    store.ack_message("worker", unapproved_urgent["id"])
+
+    # 2. Priority ordering (urgent before normal), coalesce_key retirement without stranding ack_required=True, and low batch window
+    n1 = store.send_envelope(
+        from_agent="ci", to_agent="worker", body="build 1",
+        priority="normal", coalesce_key="ci:main", ack_required=True, operator_approved=True,
+    )
+    time.sleep(0.01)
+    n2 = store.send_envelope(
+        from_agent="ci", to_agent="worker", body="build 2",
+        priority="normal", coalesce_key="ci:main", ack_required=True, operator_approved=True,
+    )
+    time.sleep(0.01)
+    u1 = store.send_envelope(
+        from_agent="lead", to_agent="worker", body="STOP",
+        priority="urgent", operator_approved=True,
+    )
+    l1 = store.send_envelope(
+        from_agent="metrics", to_agent="worker", body="low 1",
+        priority="low", operator_approved=True,
+    )
+    l2 = store.send_envelope(
+        from_agent="metrics", to_agent="worker", body="low 2",
+        priority="low", operator_approved=True,
+    )
+
+    s_run = pulse_mailbox(store, agent_id="worker", low_batch_window=30.0)
+    assert len(s_run["dispatched"]) == 1
+    disp = s_run["dispatched"][0]
+    # Urgent u1 comes BEFORE coalesced leader n2; n1 was retired to done/
+    assert disp["message_ids"] == [u1["id"], n2["id"]]
+    assert disp["coalesced_superseded_ids"] == [n1["id"]]
+    assert any(d["message_id"] == l1["id"] and d["reason"] == "LOW_PRIORITY_BATCH_WINDOW" for d in s_run["deferred"])
+    assert any(d["message_id"] == l2["id"] and d["reason"] == "LOW_PRIORITY_BATCH_WINDOW" for d in s_run["deferred"])
+
+    # Verify prompt carried [URGENT] and leader n2 recorded coalesced_ids while n1 moved to done/ with coalesced_into
+    batches = [json.loads(ln) for ln in recorded_cmds.read_text(encoding="utf-8").splitlines()]
+    assert batches[0]["ids"] == f"{u1['id']},{n2['id']}"
+    assert "[URGENT]" in batches[0]["prompt"]
+
+    done_msgs = {m["id"]: m for m in store.list_inbox("worker", state="done")}
+    assert n1["id"] in done_msgs
+    assert done_msgs[n1["id"]]["coalesced_into"] == n2["id"]
+    claimed_msgs = {m["id"]: m for m in store.list_inbox("worker", state="claimed")}
+    assert claimed_msgs[n2["id"]]["coalesced_ids"] == [n1["id"]]
+    assert claimed_msgs[n2["id"]]["ack_required"] is True
+
+    # 3. Once low_batch_window max-age floor elapses, pending low envelopes dispatch together
+    s_low_ready = pulse_mailbox(store, agent_id="worker", low_batch_window=30.0, now=utc_now() + dt.timedelta(seconds=35))
+    assert len(s_low_ready["dispatched"]) == 1
+    assert s_low_ready["dispatched"][0]["message_ids"] == [l1["id"], l2["id"]]
+
+    # 4. If driver fails/defers, coalesced envelopes are NOT prematurely retired to done/
+    store.register_agent("flaky", driver="command", command=[sys.executable, "-c", "import sys; sys.exit(1)"])
+    f1 = store.send_envelope(from_agent="a", to_agent="flaky", body="c1", coalesce_key="k1", operator_approved=True)
+    time.sleep(0.01)
+    f2 = store.send_envelope(from_agent="a", to_agent="flaky", body="c2", coalesce_key="k1", operator_approved=True)
+    s_fail = pulse_mailbox(store, agent_id="flaky")
+    assert len(s_fail["failed"]) == 1
+    assert store.list_inbox("flaky", state="done") == []
+    assert [m["id"] for m in store.list_inbox("flaky", state="unread")] == [f1["id"], f2["id"]]
+

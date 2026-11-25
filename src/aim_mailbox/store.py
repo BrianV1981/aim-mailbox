@@ -24,6 +24,8 @@ WINDOWS_RESERVED_NAMES = frozenset(
     }
 )
 BOX_STATES = ("unread", "claimed", "done", "dead")
+PRIORITY_LEVELS = ("urgent", "normal", "low")
+PRIORITY_RANK = {"urgent": 0, "normal": 1, "low": 2}
 
 
 class MailboxError(RuntimeError):
@@ -102,6 +104,30 @@ def validate_http_url(raw: str) -> str:
     parsed = urllib.parse.urlparse(cleaned)
     if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
         raise MailboxError(f"Invalid HTTP URL {raw!r}: expected http:// or https:// with host.")
+    return cleaned
+
+
+def validate_priority(raw: str | None) -> str:
+    """Validate envelope priority lane (urgent, normal, low)."""
+    if raw is None:
+        return "normal"
+    if not isinstance(raw, str):
+        raise MailboxError("Priority must be a string.")
+    cleaned = raw.strip().lower()
+    if cleaned not in PRIORITY_LEVELS:
+        raise MailboxError(f"Unsupported priority {raw!r}; choose from {', '.join(PRIORITY_LEVELS)}.")
+    return cleaned
+
+
+def validate_coalesce_key(raw: str | None) -> str | None:
+    """Validate an optional envelope coalesce key."""
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise MailboxError("Coalesce key must be a string.")
+    cleaned = raw.strip()
+    if not cleaned or len(cleaned) > 128 or any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+        raise MailboxError(f"Invalid coalesce key {raw!r}: must be 1-128 printable characters.")
     return cleaned
 
 
@@ -525,10 +551,14 @@ class MailboxStore:
         ack_required: bool = True,
         operator_approved: bool = False,
         max_attempts: int = 3,
+        priority: str = "normal",
+        coalesce_key: str | None = None,
     ) -> dict[str, Any]:
         sender = validate_agent_id(from_agent)
         recipient = validate_agent_id(to_agent)
         reply_target = validate_agent_id(reply_to) if reply_to else sender
+        clean_priority = validate_priority(priority)
+        clean_coalesce_key = validate_coalesce_key(coalesce_key)
         if not isinstance(body, str) or not body.strip():
             raise MailboxError("Message body must be non-empty.")
 
@@ -558,6 +588,8 @@ class MailboxStore:
             "subject": subject.strip(),
             "body": body.strip(),
             "refs": [str(r) for r in (refs or []) if str(r).strip()],
+            "priority": clean_priority,
+            "coalesce_key": clean_coalesce_key,
             "hop_count": effective_hop,
             "max_hops": effective_max_hops,
             "ack_required": bool(ack_required),
@@ -580,6 +612,8 @@ class MailboxStore:
         if "id" in data and data["id"] is not None:
             validate_message_id(str(data["id"]), allow_json_ext=False)
         data["id"] = canonical_id
+        data.setdefault("priority", "normal")
+        data.setdefault("coalesce_key", None)
         return data
 
     def _envelope_timestamp(self, data: dict[str, Any], path: Path, *, primary_keys: tuple[str, ...] = ("created_at",)) -> dt.datetime:
@@ -602,6 +636,7 @@ class MailboxStore:
         query: str | None = None,
         since: str | None = None,
         limit: int | None = None,
+        priority: str | None = None,
     ) -> list[dict[str, Any]]:
         aid = validate_agent_id(agent_id)
         if state == "all":
@@ -616,6 +651,7 @@ class MailboxStore:
             )
 
         from_filter = validate_agent_id(from_agent) if from_agent is not None else None
+        priority_filter = validate_priority(priority) if priority is not None else None
         thread_filter: str | None = None
         if thread_id is not None:
             thread_filter = thread_id.strip()
@@ -654,6 +690,8 @@ class MailboxStore:
                 try:
                     data = self._load_envelope_file(p, st_dir)
                     if from_filter is not None and str(data.get("from", "")).lower() != from_filter:
+                        continue
+                    if priority_filter is not None and str(data.get("priority") or "normal").lower() != priority_filter:
                         continue
                     if thread_filter is not None and str(data.get("thread_id", "")) != thread_filter:
                         continue
@@ -1033,6 +1071,7 @@ class MailboxStore:
         *,
         note: str = "",
         delivery: dict[str, Any] | None = None,
+        coalesced_into: str | None = None,
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
         box = self.ensure_agent_box(aid)
@@ -1042,10 +1081,32 @@ class MailboxStore:
             data["ack_note"] = note.strip()
         if delivery is not None:
             data["delivery"] = delivery
+        if coalesced_into is not None:
+            data["coalesced_into"] = validate_message_id(coalesced_into, allow_json_ext=False)
         dst = box / "done" / f"{data['id']}.json"
         self._transition_envelope(path, dst, data, box, "done")
         out = dict(data)
         out["state"] = "done"
+        return out
+
+    def update_claimed_metadata(
+        self,
+        agent_id: str,
+        msg_id: str,
+        *,
+        coalesced_ids: list[str] | None = None,
+        ack_required: bool | None = None,
+    ) -> dict[str, Any]:
+        aid = validate_agent_id(agent_id)
+        box = self.ensure_agent_box(aid)
+        _, path, data = self._find_envelope(aid, msg_id, states=("claimed",))
+        if coalesced_ids is not None:
+            data["coalesced_ids"] = [validate_message_id(cid, allow_json_ext=False) for cid in coalesced_ids]
+        if ack_required is not None:
+            data["ack_required"] = bool(ack_required)
+        write_json_atomic(path, data, tmp_dir=box / "tmp")
+        out = dict(data)
+        out["state"] = "claimed"
         return out
 
     def quarantine_message(
@@ -1079,6 +1140,8 @@ class MailboxStore:
         refs: list[str] | None = None,
         ack_parent: bool = True,
         ack_required: bool = False,
+        priority: str = "normal",
+        coalesce_key: str | None = None,
     ) -> dict[str, Any]:
         aid = validate_agent_id(agent_id)
         try:
@@ -1124,6 +1187,8 @@ class MailboxStore:
             max_hops=max_hops,
             ack_required=ack_required,
             operator_approved=True,
+            priority=priority,
+            coalesce_key=coalesce_key,
         )
         if ack_parent:
             self.ack_message(aid, str(parent["id"]), note=f"Replied via {sent['id']}")

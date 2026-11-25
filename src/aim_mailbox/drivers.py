@@ -48,8 +48,9 @@ def build_wake_prompt(agent_id: str, envelopes: list[dict[str, Any]], mailbox_di
     ids = ", ".join(safe_ids)
     senders = ", ".join(safe_senders)
     count = len(envelopes)
+    urgent_tag = "[URGENT]" if any(str(e.get("priority") or "normal").lower() == "urgent" for e in envelopes) else ""
     return (
-        f"[AIM-MAILBOX WAKEUP] Agent '{safe_agent}' has {count} pending message(s) "
+        f"[AIM-MAILBOX WAKEUP]{urgent_tag} Agent '{safe_agent}' has {count} pending message(s) "
         f"from {senders} (id: {ids}). "
         f"Run `aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent} --state active`, "
         f"read each message (`aim-mail read {safe_agent} <id>`), complete authorized tasks, "
@@ -66,16 +67,17 @@ def build_tmux_doorbell(
     envelopes = envelope_or_envelopes if isinstance(envelope_or_envelopes, list) else [envelope_or_envelopes]
     safe_ids = [validate_message_id(str(e["id"]), allow_json_ext=False) for e in envelopes]
     senders = sorted({validate_agent_id(str(e.get("from") or "peer")) for e in envelopes})
+    urgent_tag = " [URGENT]" if any(str(e.get("priority") or "normal").lower() == "urgent" for e in envelopes) else ""
     if len(envelopes) == 1:
         msg_id = safe_ids[0]
         sender = senders[0]
         reply_to = validate_agent_id(str(envelopes[0].get("reply_to") or sender))
         return (
-            f"[AIM-MAIL from:{sender} reply_to:{reply_to} id:{msg_id}] "
+            f"[AIM-MAIL{urgent_tag} from:{sender} reply_to:{reply_to} id:{msg_id}] "
             f"Pending mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" read {safe_agent} {msg_id}"
         )
     return (
-        f"[AIM-MAIL ({len(envelopes)} msgs) from:{','.join(senders)} ids:{','.join(safe_ids)}] "
+        f"[AIM-MAIL{urgent_tag} ({len(envelopes)} msgs) from:{','.join(senders)} ids:{','.join(safe_ids)}] "
         f"Pending mail waiting — run: aim-mail --mailbox-dir \"{mailbox_dir}\" inbox {safe_agent} --state active"
     )
 

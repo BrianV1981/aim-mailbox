@@ -495,3 +495,60 @@ def test_inbox_filters_and_gc_retention_safety(tmp_path: Path) -> None:
     assert len(store.list_inbox("worker", state="unread")) == 1
     assert len(store.list_inbox("worker", state="claimed")) == 1
     assert len(store.list_inbox("worker", state="dead")) == 1
+
+
+def test_priority_and_coalesce_key_schema_and_v012_backcompat(tmp_path: Path) -> None:
+    store = MailboxStore(tmp_path / "mailbox")
+    urgent = store.send_envelope(
+        from_agent="lead",
+        to_agent="worker",
+        body="STOP now",
+        priority="URGENT",
+        coalesce_key="build:main",
+        operator_approved=True,
+    )
+    assert urgent["priority"] == "urgent"
+    assert urgent["coalesce_key"] == "build:main"
+
+    with pytest.raises(MailboxError):
+        store.send_envelope(from_agent="lead", to_agent="worker", body="bad", priority="critical")
+    with pytest.raises(MailboxError):
+        store.send_envelope(from_agent="lead", to_agent="worker", body="bad", coalesce_key="bad\nkey")
+
+    # Legacy v0.1.2 envelope without priority/coalesce_key fields loads seamlessly with defaults
+    legacy_id = "20261118T120000000000Z_legacy01"
+    legacy_path = store.boxes_dir / "worker" / "unread" / f"{legacy_id}.json"
+    legacy_path.write_text(
+        json.dumps(
+            {
+                "id": legacy_id,
+                "thread_id": "thr_legacy",
+                "in_reply_to": None,
+                "from": "old-sender",
+                "to": "worker",
+                "reply_to": "old-sender",
+                "subject": "Legacy",
+                "body": "v0.1.2 format",
+                "refs": [],
+                "hop_count": 0,
+                "max_hops": 1,
+                "ack_required": True,
+                "operator_approved": True,
+                "attempts": 0,
+                "max_attempts": 3,
+                "created_at": "2026-11-18T12:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    urgent_only = store.list_inbox("worker", state="unread", priority="urgent")
+    assert [m["id"] for m in urgent_only] == [urgent["id"]]
+    normal_only = store.list_inbox("worker", state="unread", priority="normal")
+    assert [m["id"] for m in normal_only] == [legacy_id]
+    assert normal_only[0]["priority"] == "normal"
+    assert normal_only[0]["coalesce_key"] is None
+
+    rep = store.reply_message("worker", urgent["id"], body="acknowledged stop", priority="low", coalesce_key="ack:stop")
+    assert rep["priority"] == "low"
+    assert rep["coalesce_key"] == "ack:stop"
