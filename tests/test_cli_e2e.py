@@ -486,3 +486,176 @@ def test_cli_priority_coalesce_and_low_wake_fail_closed_e2e(tmp_path: Path) -> N
     r_inb = _run_cli("inbox", "worker", "--state", "all", "--priority", "urgent", "--mailbox-dir", mb, "--json")
     assert r_inb.returncode == 0
     assert [m["id"] for m in json.loads(r_inb.stdout)["messages"]] == [urg["id"]]
+
+
+def test_install_hooks_all_harnesses_and_agy_check_formats(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+
+    # 1. agy: non-destructive merge + dry-run + idempotent uninstall
+    agy_cfg = tmp_path / "agy_cfg"
+    agy_cfg.mkdir()
+    (agy_cfg / "hooks.json").write_text(
+        json.dumps({"user-linter": {"enabled": True, "Stop": [{"type": "command", "command": "echo keep"}]}}),
+        encoding="utf-8",
+    )
+    r_agy_dry = _run_cli(
+        "install-hooks", "--harness", "agy", "--agent", "w-agy",
+        "--config-dir", str(agy_cfg), "--mailbox-dir", mb, "--dry-run", "--json",
+    )
+    assert r_agy_dry.returncode == 0
+    dry_payload = json.loads(r_agy_dry.stdout)
+    assert dry_payload["dry_run"] is True
+    assert "aim-mailbox" not in json.loads((agy_cfg / "hooks.json").read_text(encoding="utf-8"))
+
+    r_agy = _run_cli(
+        "install-hooks", "--harness", "agy", "--agent", "w-agy",
+        "--config-dir", str(agy_cfg), "--mailbox-dir", mb, "--json",
+    )
+    assert r_agy.returncode == 0
+    agy_data = json.loads((agy_cfg / "hooks.json").read_text(encoding="utf-8"))
+    assert "user-linter" in agy_data
+    assert agy_data["aim-mailbox"]["enabled"] is True
+    assert agy_data["aim-mailbox"]["SessionStart"][0]["type"] == "command"
+    assert "--format agy-inject" in agy_data["aim-mailbox"]["PreInvocation"][0]["command"]
+    assert "--format agy-stop" in agy_data["aim-mailbox"]["Stop"][0]["command"]
+
+    r_agy_un = _run_cli(
+        "install-hooks", "--harness", "agy", "--agent", "w-agy",
+        "--config-dir", str(agy_cfg), "--uninstall", "--json",
+    )
+    assert r_agy_un.returncode == 0
+    assert json.loads(r_agy_un.stdout)["uninstalled"] is True
+    agy_after = json.loads((agy_cfg / "hooks.json").read_text(encoding="utf-8"))
+    assert "aim-mailbox" not in agy_after and "user-linter" in agy_after
+
+    # 2. codex: preserves existing Stop hooks and avoids duplicates on re-install
+    codex_cfg = tmp_path / "codex_cfg"
+    codex_cfg.mkdir()
+    (codex_cfg / "hooks.json").write_text(
+        json.dumps(
+            {
+                "description": "User Codex hooks",
+                "hooks": {
+                    "Stop": [{"hooks": [{"type": "command", "command": "echo chime", "timeout": 5}]}]
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    for _ in range(2):
+        assert (
+            _run_cli(
+                "install-hooks", "--harness", "codex", "--agent", "w-codex",
+                "--config-dir", str(codex_cfg), "--mailbox-dir", mb, "--json",
+            ).returncode
+            == 0
+        )
+    codex_data = json.loads((codex_cfg / "hooks.json").read_text(encoding="utf-8"))
+    assert len(codex_data["hooks"]["Stop"]) == 2
+    assert codex_data["hooks"]["Stop"][0]["hooks"][0]["command"] == "echo chime"
+    assert codex_data["hooks"]["Stop"][1]["hooks"][0]["statusMessage"] == "aim-mailbox:w-codex"
+
+    assert (
+        _run_cli(
+            "install-hooks", "--harness", "codex", "--agent", "w-codex",
+            "--config-dir", str(codex_cfg), "--uninstall",
+        ).returncode
+        == 0
+    )
+    codex_after = json.loads((codex_cfg / "hooks.json").read_text(encoding="utf-8"))
+    assert len(codex_after["hooks"]["Stop"]) == 1
+    assert codex_after["hooks"]["Stop"][0]["hooks"][0]["command"] == "echo chime"
+
+    # 3. grok: writes hooks/aim-mailbox.json without touching sibling hook files
+    grok_cfg = tmp_path / "grok_cfg"
+    (grok_cfg / "hooks").mkdir(parents=True)
+    sibling = grok_cfg / "hooks" / "existing.json"
+    sibling.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+    r_grok = _run_cli(
+        "install-hooks", "--harness", "grok", "--agent", "w-grok",
+        "--config-dir", str(grok_cfg), "--mailbox-dir", mb, "--json",
+    )
+    assert r_grok.returncode == 0
+    grok_file = grok_cfg / "hooks" / "aim-mailbox.json"
+    assert grok_file.is_file()
+    grok_json = json.loads(grok_file.read_text(encoding="utf-8"))
+    assert "SessionStart" in grok_json["hooks"] and "Stop" in grok_json["hooks"]
+    assert _run_cli("install-hooks", "--harness", "grok", "--agent", "w-grok", "--config-dir", str(grok_cfg), "--uninstall").returncode == 0
+    assert not grok_file.exists() and sibling.is_file()
+
+    # 4. opencode (generic fallback leaves opencode.json untouched) & generic
+    oc_cfg = tmp_path / "oc_cfg"
+    oc_cfg.mkdir()
+    oc_json = oc_cfg / "opencode.json"
+    oc_json.write_text(json.dumps({"$schema": "https://opencode.ai/config.json"}), encoding="utf-8")
+    r_oc = _run_cli(
+        "install-hooks", "--harness", "opencode", "--agent", "w-oc",
+        "--config-dir", str(oc_cfg), "--mailbox-dir", mb, "--json",
+    )
+    assert r_oc.returncode == 0
+    oc_res = json.loads(r_oc.stdout)
+    assert oc_res["mode"] == "generic_fallback"
+    assert Path(oc_res["target_path"]).is_file()
+    assert json.loads(oc_json.read_text(encoding="utf-8")) == {"$schema": "https://opencode.ai/config.json"}
+    assert _run_cli("install-hooks", "--harness", "opencode", "--agent", "w-oc", "--config-dir", str(oc_cfg), "--uninstall").returncode == 0
+    assert not Path(oc_res["target_path"]).exists()
+
+    gen_cfg = tmp_path / "gen_cfg"
+    r_gen = _run_cli(
+        "install-hooks", "--harness", "generic", "--agent", "w-gen",
+        "--config-dir", str(gen_cfg), "--mailbox-dir", mb, "--json",
+    )
+    assert r_gen.returncode == 0
+    gen_path = Path(json.loads(r_gen.stdout)["target_path"])
+    assert gen_path.is_file()
+    assert _run_cli("install-hooks", "--harness", "generic", "--agent", "w-gen", "--config-dir", str(gen_cfg), "--uninstall").returncode == 0
+    assert not gen_path.exists()
+
+    # 5. agy-inject & agy-stop check formats + anti-loop continuationActive + <15ms empty latency
+    r_empty_inj = _run_cli("check", "w-agy", "--inject", "--quiet", "--format", "agy-inject", "--mailbox-dir", mb)
+    assert r_empty_inj.returncode == 0
+    assert json.loads(r_empty_inj.stdout) == {}
+
+    assert _run_cli("send", "--mailbox-dir", mb, "--from", "lead", "--to", "w-agy", "--body", "ping").returncode == 0
+    r_full_inj = _run_cli("check", "w-agy", "--inject", "--quiet", "--format", "agy-inject", "--mailbox-dir", mb)
+    assert r_full_inj.returncode == 0
+    inj_payload = json.loads(r_full_inj.stdout)
+    assert "1 unread message(s) for 'w-agy'" in inj_payload["injectSteps"][0]["systemMessage"]["systemMessage"]
+
+    r_stop_cont = _run_cli("check", "w-agy", "--inject", "--quiet", "--format", "agy-stop", "--mailbox-dir", mb)
+    assert r_stop_cont.returncode == 0
+    assert json.loads(r_stop_cont.stdout)["decision"] == "continue"
+
+    # Anti-loop: continuationActive=true on stdin suppresses repeated Stop continuation
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(SRC_DIR)
+    r_stop_loop = subprocess.run(
+        [sys.executable, "-m", "aim_mailbox", "check", "w-agy", "--inject", "--quiet", "--format", "agy-stop", "--mailbox-dir", mb],
+        cwd=str(REPO_ROOT),
+        env=env,
+        input=json.dumps({"continuationActive": True}),
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert r_stop_loop.returncode == 0
+    assert json.loads(r_stop_loop.stdout) == {}
+
+    if os.name != "nt":
+        import time as _time
+
+        sh_shim = REPO_ROOT / "bin" / "aim-mail"
+        # Warmup once for bytecode cache, then measure empty-inbox check latency
+        subprocess.run([str(sh_shim), "check", "empty-agent", "--inject", "--quiet", "--mailbox-dir", mb], check=True)
+        samples: list[float] = []
+        for _ in range(5):
+            t0 = _time.perf_counter()
+            r_fast = subprocess.run(
+                [str(sh_shim), "check", "empty-agent", "--inject", "--quiet", "--mailbox-dir", mb],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            samples.append((_time.perf_counter() - t0) * 1000.0)
+            assert r_fast.stdout == ""
+        assert min(samples) < 15.0, f"Empty check --inject --quiet exceeded 15ms: {samples}"

@@ -9,13 +9,13 @@ if defined PYTHONPATH (
 
 where python >nul 2>nul
 if errorlevel 1 goto try_py
-python -m aim_mailbox %*
+python -S "%REPO_ROOT%\src\aim_mailbox\__main__.py" %*
 exit /b %ERRORLEVEL%
 
 :try_py
 where py >nul 2>nul
 if errorlevel 1 goto no_python
-py -3 -m aim_mailbox %*
+py -3 -S "%REPO_ROOT%\src\aim_mailbox\__main__.py" %*
 exit /b %ERRORLEVEL%
 
 :no_python

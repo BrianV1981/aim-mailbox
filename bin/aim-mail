@@ -12,9 +12,9 @@ REPO_ROOT="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
 export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
 
 if command -v python3 >/dev/null 2>&1; then
-    exec python3 -m aim_mailbox "$@"
+    exec python3 -S "${REPO_ROOT}/src/aim_mailbox/__main__.py" "$@"
 elif command -v python >/dev/null 2>&1; then
-    exec python -m aim_mailbox "$@"
+    exec python -S "${REPO_ROOT}/src/aim_mailbox/__main__.py" "$@"
 else
     echo "[ERROR] python3 (3.10+) is required on PATH." >&2
     exit 1

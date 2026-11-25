@@ -105,12 +105,13 @@ aim-mail install-agy-sidecar --uninstall
 | `aim-mail read <agent> [id] [--claim] [--ack]` | Read a specific or oldest unread envelope |
 | `aim-mail reply <agent> <id> --body "..."` | Reply to `reply_to`, increment `hop_count`, and auto-ACK parent |
 | `aim-mail ack <agent> <id> [--note "..."]` | Move envelope to `done/` with completion timestamp |
-| `aim-mail check <agent> [--inject]` | `<5ms` unread check for client pre/post-turn hooks |
+| `aim-mail check <agent> [--inject]` | `<15ms` unread check for client pre/post-turn hooks |
 | `aim-mail wait <agent> [--thread-id ...]` | Block at `0` LLM cost until matching unread mail lands |
 | `aim-mail pulse [--agent ...] [--dry-run]` | Single-pass zero-LLM wake dispatcher for `cron` / Task Scheduler |
 | `aim-mail watch [--interval 1.5]` | Continuous zero-LLM Maildir watcher for Sidecars |
 | `aim-mail gc [--done-days 14] [--dead-days 30]` | Prune or `--archive-dir` aged terminal envelopes in `done/` and `dead/` |
 | `aim-mail install-agy-sidecar` | Non-destructively install or `--uninstall` the Antigravity Desktop Sidecar |
+| `aim-mail install-hooks --harness <name>` | Non-destructively install/uninstall turn-boundary `check --inject` hooks (`agy`, `codex`, `grok`, `opencode`, `generic`) |
 | `aim-mail describe` | Output compact JSON schema of commands, states, and drivers |
 
 ---

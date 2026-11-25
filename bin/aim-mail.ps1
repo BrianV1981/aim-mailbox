@@ -7,10 +7,10 @@ if ($env:PYTHONPATH) {
 }
 
 if (Get-Command python -ErrorAction SilentlyContinue) {
-    & python -m aim_mailbox @args
+    & python -S "$RepoRoot\src\aim_mailbox\__main__.py" @args
     exit $LASTEXITCODE
 } elseif (Get-Command py -ErrorAction SilentlyContinue) {
-    & py -3 -m aim_mailbox @args
+    & py -3 -S "$RepoRoot\src\aim_mailbox\__main__.py" @args
     exit $LASTEXITCODE
 } else {
     [Console]::Error.WriteLine("[ERROR] Python 3.10+ is required on PATH.")

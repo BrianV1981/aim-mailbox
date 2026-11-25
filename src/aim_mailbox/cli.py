@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-import argparse
-import json
+import os
 import sys
-from pathlib import Path
-from typing import Any, Callable
 
 from . import __version__
-from .dispatcher import pulse_mailbox, watch_mailbox
-from .drivers import DRIVER_NAMES, install_agy_sidecar, uninstall_agy_sidecar
-from .store import BOX_STATES, PRIORITY_LEVELS, MailboxError, MailboxStore
+from ._fast_check import try_fast_empty_check
+
+TYPE_CHECKING = False
+if TYPE_CHECKING:
+    import argparse
+    from typing import Any, Callable
+    from .store import MailboxStore
 
 
 def _ensure_utf8_stdio() -> None:
@@ -23,11 +24,15 @@ def _ensure_utf8_stdio() -> None:
 
 
 def _resolve_store(args: argparse.Namespace) -> MailboxStore:
+    from .store import MailboxStore
+
     mb_dir = getattr(args, "mailbox_dir", None)
     return MailboxStore(mb_dir)
 
 
 def _emit(payload: Any, as_json: bool, human_lines: list[str] | None = None) -> None:
+    import json
+
     if as_json or human_lines is None:
         print(json.dumps(payload, indent=2, ensure_ascii=False))
     else:
@@ -36,6 +41,9 @@ def _emit(payload: Any, as_json: bool, human_lines: list[str] | None = None) -> 
 
 
 def cmd_register(args: argparse.Namespace) -> int:
+    import json
+    from .store import MailboxError
+
     store = _resolve_store(args)
     if args.unregister:
         removed = store.unregister_agent(args.agent)
@@ -143,6 +151,8 @@ def cmd_send(args: argparse.Namespace) -> int:
     )
     wake_summary = None
     if args.wake:
+        from .dispatcher import pulse_mailbox
+
         wake_summary = pulse_mailbox(store, agent_id=sent["to"])
         sent["wake"] = wake_summary
 
@@ -251,6 +261,8 @@ def cmd_reply(args: argparse.Namespace) -> int:
     )
     wake_summary = None
     if args.wake:
+        from .dispatcher import pulse_mailbox
+
         wake_summary = pulse_mailbox(store, agent_id=sent["to"])
         sent["wake"] = wake_summary
 
@@ -269,13 +281,59 @@ def cmd_ack(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_stdin_json_nonblocking() -> dict[str, Any]:
+    import json
+
+    if sys.stdin is None or sys.stdin.isatty():
+        return {}
+    try:
+        raw = sys.stdin.read()
+        if raw and raw.strip():
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                return parsed
+    except Exception:
+        pass
+    return {}
+
+
 def cmd_check(args: argparse.Namespace) -> int:
+    import json
+
     store = _resolve_store(args)
     unread = store.list_inbox(args.agent, state="unread")
     count = len(unread)
+    fmt = getattr(args, "format", "text")
     if args.json:
         _emit({"agent": args.agent, "unread_count": count, "message_ids": [m["id"] for m in unread]}, True)
         return 0
+    if fmt == "agy-inject":
+        if count == 0:
+            print("{}")
+            return 0
+        senders = ", ".join(sorted({str(m.get("from", "peer")) for m in unread}))
+        notice = (
+            f"[AIM-MAILBOX: {count} unread message(s) for '{args.agent}' from {senders} — "
+            f"run `aim-mail inbox {args.agent}` and `aim-mail read {args.agent}`]"
+        )
+        print(json.dumps({"injectSteps": [{"systemMessage": {"systemMessage": notice}}]}))
+        return 0
+    if fmt == "agy-stop":
+        if count == 0:
+            print("{}")
+            return 0
+        hook_in = _read_stdin_json_nonblocking()
+        if hook_in.get("continuationActive"):
+            print("{}")
+            return 0
+        senders = ", ".join(sorted({str(m.get("from", "peer")) for m in unread}))
+        notice = (
+            f"[AIM-MAILBOX: {count} unread message(s) for '{args.agent}' from {senders} — "
+            f"run `aim-mail inbox {args.agent}` and `aim-mail read {args.agent}`]"
+        )
+        print(json.dumps({"decision": "continue", "reason": notice}))
+        return 0
+
     if count == 0:
         if not args.quiet and not args.inject:
             print(f"0 unread messages for '{args.agent}'.")
@@ -311,6 +369,8 @@ def cmd_wait(args: argparse.Namespace) -> int:
 
 
 def cmd_pulse(args: argparse.Namespace) -> int:
+    from .dispatcher import pulse_mailbox
+
     store = _resolve_store(args)
     summary = pulse_mailbox(
         store,
@@ -331,6 +391,8 @@ def cmd_pulse(args: argparse.Namespace) -> int:
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
+    from .dispatcher import watch_mailbox
+
     store = _resolve_store(args)
     return watch_mailbox(
         store,
@@ -343,6 +405,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
 
 def cmd_install_agy_sidecar(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from .drivers import install_agy_sidecar, uninstall_agy_sidecar
+
     store = _resolve_store(args)
     cfg_dir = Path(args.config_dir) if args.config_dir else None
     if args.uninstall:
@@ -370,11 +435,71 @@ def cmd_install_agy_sidecar(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_install_hooks(args: argparse.Namespace) -> int:
+    from pathlib import Path
+    from .hooks import install_hooks, uninstall_hooks
+    from .store import validate_agent_id
+
+    mb_explicit = getattr(args, "mailbox_dir", None)
+    mb_path = Path(mb_explicit).expanduser().resolve() if mb_explicit else None
+    cfg_dir = Path(args.config_dir) if args.config_dir else None
+    ws_dir = Path(args.workspace) if args.workspace else None
+    agent_id = args.agent or (Path.cwd().name or "default")
+    try:
+        agent_id = validate_agent_id(agent_id)
+    except Exception:
+        if args.agent:
+            raise
+        agent_id = "default"
+
+    if args.uninstall:
+        res = uninstall_hooks(
+            harness=args.harness,
+            agent_id=agent_id,
+            config_dir=cfg_dir,
+            workspace=ws_dir,
+            dry_run=args.dry_run,
+        )
+        _emit(
+            res,
+            args.json,
+            [f"[OK] Uninstalled '{res['harness']}' hook at {res['target_path']} (found={res['found']})."],
+        )
+        return 0
+
+    res = install_hooks(
+        harness=args.harness,
+        agent_id=agent_id,
+        mailbox_dir=mb_path,
+        config_dir=cfg_dir,
+        workspace=ws_dir,
+        dry_run=args.dry_run,
+    )
+    prefix = "DRY-RUN" if res["dry_run"] else "OK"
+    _emit(
+        res,
+        args.json,
+        [
+            f"[{prefix}] Installed '{res['harness']}' turn-boundary hook ({res['mode']})",
+            f"     Target:  {res['target_path']}",
+            f"     Command: {res['command']}",
+            *(f"[WARN] {w}" for w in res.get("warnings", [])),
+        ],
+    )
+    return 0
+
+
 def cmd_describe(_args: argparse.Namespace) -> int:
+    import json
+    from .drivers import DRIVER_NAMES
+    from .hooks import HARNESS_NAMES
+    from .store import BOX_STATES, PRIORITY_LEVELS
+
     spec = {
         "name": "aim-mail",
         "version": __version__,
         "drivers": list(DRIVER_NAMES),
+        "harnesses": list(HARNESS_NAMES),
         "states": list(BOX_STATES),
         "priorities": list(PRIORITY_LEVELS),
         "commands": sorted(COMMAND_HANDLERS.keys()),
@@ -402,11 +527,16 @@ COMMAND_HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
     "watch": cmd_watch,
     "gc": cmd_gc,
     "install-agy-sidecar": cmd_install_agy_sidecar,
+    "install-hooks": cmd_install_hooks,
     "describe": cmd_describe,
 }
 
 
 def build_parser() -> argparse.ArgumentParser:
+    import argparse
+    from .drivers import DRIVER_NAMES
+    from .hooks import HARNESS_NAMES
+    from .store import BOX_STATES, PRIORITY_LEVELS
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument(
         "--mailbox-dir",
@@ -518,10 +648,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ack.add_argument("--note", default="", help="Optional completion note")
     p_ack.add_argument("--json", action="store_true", help="Emit JSON output")
 
-    p_check = sub.add_parser("check", parents=[common], help="Fast (<5ms) unread check for turn hooks")
+    p_check = sub.add_parser("check", parents=[common], help="Fast (<15ms) unread check for turn hooks")
     p_check.add_argument("agent", help="Target agent ID")
     p_check.add_argument("--inject", action="store_true", help="Print steering notice only when unread > 0")
     p_check.add_argument("--quiet", action="store_true", help="Suppress output")
+    p_check.add_argument("--format", choices=("text", "agy-inject", "agy-stop"), default="text", help="Output format for turn hooks")
     p_check.add_argument("--json", action="store_true", help="Emit JSON output")
 
     p_wait = sub.add_parser("wait", parents=[common], help="Block at zero LLM cost until unread mail arrives")
@@ -566,6 +697,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_sidecar.add_argument("--uninstall", action="store_true", help="Remove sidecar directory and config entry")
     p_sidecar.add_argument("--json", action="store_true", help="Emit JSON output")
 
+    p_hooks = sub.add_parser(
+        "install-hooks",
+        parents=[common],
+        help="Install or uninstall non-destructive turn-boundary check hooks",
+    )
+    p_hooks.add_argument("--harness", required=True, choices=HARNESS_NAMES, help="Target AI harness")
+    p_hooks.add_argument("--agent", default=None, help="Logical agent ID for check --inject (default: cwd name)")
+    p_hooks.add_argument("--config-dir", default=None, help="Override harness config directory")
+    p_hooks.add_argument("--workspace", default=None, help="Project workspace root for workspace-scoped hooks (agy/grok)")
+    p_hooks.add_argument("--uninstall", action="store_true", help="Remove aim-mailbox hook entries non-destructively")
+    p_hooks.add_argument("--dry-run", action="store_true", help="Preview target path and command without writing files")
+    p_hooks.add_argument("--json", action="store_true", help="Emit JSON output")
+
     p_desc = sub.add_parser("describe", parents=[common], help="Print compact JSON schema of CLI commands and drivers")
     p_desc.add_argument("--json", action="store_true", help="Emit JSON output (always JSON)")
     return parser
@@ -573,8 +717,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     _ensure_utf8_stdio()
+    raw_argv = sys.argv[1:] if argv is None else list(argv)
+    fast_rc = try_fast_empty_check(raw_argv)
+    if fast_rc is not None:
+        return fast_rc
+
+    from .store import MailboxError
+    import json
+
     parser = build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw_argv)
     handler = COMMAND_HANDLERS.get(args.subcommand)
     if handler is None:
         parser.error(f"Unknown subcommand: {args.subcommand}")
