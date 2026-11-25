@@ -2,6 +2,13 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.2.0] - 2026-11-24
+
+### Added
+- **Inbox Query Filters & Maildir Retention GC (`#15`):** Extended `aim-mail inbox <agent>` with pure-stdlib `--from`, `--thread-id`, `--priority`, `--query`, `--since`, and `--limit` filters (zero SQLite/FTS5), and added `aim-mail gc [--agent A] [--done-days 14] [--dead-days 30] [--dry-run] [--archive-dir DIR] [--json]` to prune or atomically archive aged terminal envelopes from `done/` and `dead/` while never touching `unread/` or `claimed/`.
+- **Priority Lanes & Coalesce-Key Batching (`#14`):** Added backward-compatible `priority` (`urgent|normal|low`, default `normal`) and `coalesce_key` fields across envelopes (`send`, `reply`, `inbox`, `read`). `pulse_mailbox()` / `watch_mailbox()` dispatch `urgent` first, coalesce matching `coalesce_key` unread envelopes into one wake batch (atomically retiring superseded IDs to `done/` with `coalesced_into` only on `DELIVERED`), defer `low` envelopes into bounded `--low-batch-window` windows (with fail-closed `send --priority low --wake` unless `--allow-deferred`), and preserve `operator_approved` and `max_hops` gates across all priorities.
+- **Cross-Harness Turn-Boundary Hook Installer & `<15ms` Fast Check (`#13`):** Added `aim-mail install-hooks --harness agy|opencode|codex|grok|generic` (`--uninstall`, `--dry-run`, `--json`) to non-destructively install turn-boundary `check --inject --quiet` hooks (using Antigravity `hooks.json` `SessionStart`/`PreInvocation`/`Stop`, Codex `hooks.json` `Stop`, Grok `hooks/aim-mailbox.json`, and generic shell fallback for OpenCode/`generic`), added `--format agy-inject|agy-stop` (with `continuationActive` loop guard) on `check`, and added a `<2ms` pure-shell / `<10ms` zero-import empty-inbox fast-path keeping empty `check --inject --quiet` well under `15ms`.
+
 ## [0.1.2] - 2026-11-23
 
 ### Security & Reliability
