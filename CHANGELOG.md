@@ -2,6 +2,11 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.3.0] - 2026-11-26
+
+### Added
+- **First-Class `amail` CLI Alias & Canonical `aim-mail` Skill (`#19`, `aim-joshua#181`):** Added `amail` alongside `aim-mail` in `pyproject.toml` `[project.scripts]` and cross-OS zero-install launchers (`bin/amail`, `bin/amail.cmd`, `bin/amail.ps1`, including the `<2ms` POSIX empty-inbox `check` fast-path and symlink-chain resolution). Updated `describe` (`brand: "A-Mail"`, `aliases: ["amail", "aim-mail"]`, `skill: "aim-mail"`), `--version` / `--help`, `hooks.py` (`amail` + `aim-mail` hook recognition), `README.md`, and `AGENTS.md` (`§8c. THE A-MAIL PROTOCOL`), and bundled canonical `skills/aim-mail/SKILL.md` superseding `aim-communicate` and retiring standalone `tmux_send.sh` scripts.
+
 ## [0.2.2] - 2026-11-25
 
 ### Fixed

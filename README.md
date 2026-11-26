@@ -1,4 +1,4 @@
-# aim-mailbox (`aim-mail`)
+# aim-mailbox — A-Mail (`amail` / `aim-mail`)
 
 **Zero-daemon, zero-LLM local Maildir post office, priority wake router, and cross-OS turn-hook installer for AI coding agents.**
 
@@ -8,7 +8,7 @@
 [![Platforms: Win11 | WSL2 | Linux | macOS](https://img.shields.io/badge/Platforms-Win11%20%7C%20WSL2%20%7C%20Linux%20%7C%20macOS-blue.svg)](#sharing-one-mailbox-between-native-windows-11-and-wsl2)
 [![A.I.M. Ecosystem](https://img.shields.io/badge/A.I.M.-Ecosystem-00d4ff.svg)](https://github.com/BrianV1981/aim-ecosystem)
 
-`aim-mailbox` (`v0.2.2`) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)**.
+**A-Mail** (`aim-mailbox` `v0.3.0`, CLI `amail` / `aim-mail`, canonical skill [`skills/aim-mail/SKILL.md`](skills/aim-mail/SKILL.md)) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)** — superseding legacy `aim-communicate` shell paste workflows.
 
 ---
 
@@ -30,7 +30,7 @@ Multi-agent coding workflows break down at three physical boundaries that most t
 
 | Tool / Platform | License / Pricing | Storage & Runtime | Wake / Delivery Mechanism | Native Win11 + WSL2 `9P` Safe? | Cross-Harness? | Idle Overhead | Key Tradeoff vs. `aim-mailbox` |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **`aim-mailbox` (`aim-mail`)** | **MIT (Free, OSS)** | **Pure-stdlib atomic JSON Maildir (`0` deps, `0` daemons)** | **9 deterministic wake drivers + `<2ms` `check --inject` hooks** | **Yes** (`os.replace` + NTFS retries) | **Yes** (Antigravity, OpenCode, Grok, Codex, VS Code, `tmux`, custom) | **`0` idle RAM, `0` idle tokens** | Built specifically for zero-daemon local multi-OS / cross-harness fleets |
+| **`aim-mailbox` — A-Mail (`amail` / `aim-mail`)** | **MIT (Free, OSS)** | **Pure-stdlib atomic JSON Maildir (`0` deps, `0` daemons)** | **9 deterministic wake drivers + `<2ms` `check --inject` hooks** | **Yes** (`os.replace` + NTFS retries) | **Yes** (Antigravity, OpenCode, Grok, Codex, VS Code, `tmux`, custom) | **`0` idle RAM, `0` idle tokens** | Built specifically for zero-daemon local multi-OS / cross-harness fleets |
 | **`@juanjofuchs/agent-mail`** / `jwcraig/agent-mail-cli` | OSS (MIT) | SQLite (`mail.db`) + Node/CLI | Passive only (`watch` blocks already-running caller) | **No** (SQLite WAL fails over `9P`) | Partial (CLI callers only) | Low | Cannot wake sleeping Desktop/CLI sessions; no `max_hops` or approval gates |
 | **`mcp_agent_mail`** / `_rust` | **Non-OSI** (MIT + vendor rider) | SQLite + Git + FastMCP/Rust server | Active client turn polling + file-lease conflict errors | **No** (SQLite WAL + server) | MCP clients only | Heavy (server + 16-screen TUI + ~30 MCP tools) | Startup MCP tool bloat burns context tokens; non-OSI license rider |
 | **`AgentWorkforce/relay`** (`agent-relay`) | Apache-2.0 | Resident daemon (`relay.sock`) + SQLite + PTY wrapper | Wraps interactive CLIs inside managed PTY/`tmux` | **No** (POSIX socket + PTY) | CLI/PTY only | Resident daemon + PTY wrappers | Forces agents inside PTY proxy; cannot wake minimized Windows Desktop GUIs |
@@ -52,7 +52,7 @@ Multi-agent coding workflows break down at three physical boundaries that most t
 3. **`<2ms` Empty-Inbox Turn Hooks + `0` Idle Overhead:** `aim-mail check <agent> --inject --quiet` short-circuits via a pure-shell / zero-import fast-path in `<2ms` on POSIX (`<10ms` in pure Python `-S`) when `unread/` is empty—spending **zero RAM** and **zero LLM tokens** between turns.
 4. **Priority Lanes & `coalesce_key` Noise Suppression (`v0.2.0`):** Emergency `urgent` stops wake ahead of `normal` traffic, duplicate status updates sharing `--coalesce-key` collapse cleanly into one wake batch (retiring superseded `ack_required=True` envelopes to `done/` with `coalesced_into` only after `DELIVERED`), and `low` traffic batches inside bounded `--low-batch-window` windows.
 5. **Loop, Security & Cost Guardrails Built Into the Store:** Enforces `max_hops` thread propagation (quarantining loops to `dead/` *before* waking any LLM), fail-closed initial `--operator-approved` gating (`rc=2`), `0o700`/`0o600` permissions, strict `../` path-traversal rejection, and `defer=True` busy handling so active sessions never burn retry attempts.
-6. **Zero Dependencies & ~50-Token Self-Describing Surface:** `0` runtime pip dependencies, `<= 15` CLI subcommands (`aim-mail describe` / `--help`), and MIT licensing—drop it into any repo via zero-install launchers (`bin/aim-mail`, `bin/aim-mail.cmd`, `bin/aim-mail.ps1`) with no vendor lock-in or MCP context bloat.
+6. **Zero Dependencies & ~50-Token Self-Describing Surface:** `0` runtime pip dependencies, `<= 15` CLI subcommands (`amail describe` / `aim-mail describe`), bundled canonical [`skills/aim-mail/SKILL.md`](skills/aim-mail/SKILL.md), and MIT licensing—drop it into any repo via zero-install launchers (`bin/amail`, `bin/amail.cmd`, `bin/amail.ps1`, plus `bin/aim-mail*`) with no vendor lock-in or MCP context bloat.
 
 ---
 
@@ -111,16 +111,27 @@ Multi-agent coding workflows break down at three physical boundaries that most t
 
 ## Installation
 
+Both **`amail`** (short primary alias) and **`aim-mail`** are installed side-by-side and behave identically across POSIX and Windows.
+
 ### Option A: `pip` / `pipx` (Editable or Wheel)
 ```bash
 pip install -e .
+amail --version
 aim-mail --version
 ```
 
-### Option B: Zero-Install Shims (Clone & Run Immediately)
-- **Linux / macOS / WSL2:** `./bin/aim-mail --help` *(symlink-safe for `~/.local/bin/aim-mail`)*
-- **Windows CMD:** `.\bin\aim-mail.cmd --help`
-- **Windows PowerShell:** `.\bin\aim-mail.ps1 --help`
+### Option B: Zero-Install Shims & User-Bin Symlinks (Clone & Run Immediately)
+- **Linux / macOS / WSL2:** `./bin/amail --help` and `./bin/aim-mail --help` *(symlink-safe for `~/.local/bin`)*:
+  ```bash
+  mkdir -p ~/.local/bin
+  ln -sfn "$(pwd)/bin/amail" ~/.local/bin/amail
+  ln -sfn "$(pwd)/bin/aim-mail" ~/.local/bin/aim-mail
+  ```
+- **Windows CMD:** `.\bin\amail.cmd --help` / `.\bin\aim-mail.cmd --help`
+- **Windows PowerShell:** `.\bin\amail.ps1 --help` / `.\bin\aim-mail.ps1 --help`
+
+### Canonical Agent Skill (`aim-mail`)
+Install [`skills/aim-mail/SKILL.md`](skills/aim-mail/SKILL.md) (or via [`aim-skill-library`](https://github.com/BrianV1981/aim-skill-library)) into your harness skill directory (`~/.gemini/skills/aim-mail`, `~/.gemini/antigravity-cli/skills/aim-mail`, `~/.grok/skills/aim-mail`, `~/.codex/skills/aim-mail`, `~/.config/opencode/skills/aim-mail`). A-Mail replaces `aim-communicate` and standalone `tmux` paste scripts across all vessels.
 
 ### Sharing One Mailbox Between Native Windows 11 and WSL2
 Point WSL2 at your Windows user mailbox directory so native Windows apps and WSL2 CLI agents read and write the exact same Maildir:
@@ -131,19 +142,21 @@ export AIM_MAILBOX_DIR="/mnt/c/Users/<YourWindowsUser>/.aim/mailbox"
 
 ---
 
-## Quickstart & `v0.2.0` Workflows
+## Quickstart & Workflows
 
-### 1. Core Messaging & Wake Loop
+### 1. Core Messaging & Wake Loop (`amail` / `aim-mail`)
 ```bash
 # Register logical agents by project folder (zero session-id updates needed across handoffs!)
-aim-mail register aim-auditor --driver agy-cli --cwd ~/aim-auditor
-aim-mail register copy-cat --driver agy-desktop-sidecar --cwd "C:\Projects\copy-cat"
-aim-mail register backend-dev --driver opencode-http --http-url http://127.0.0.1:4096
+amail register aim-auditor --driver agy-cli --cwd ~/aim-auditor
+amail register copy-cat --driver agy-desktop-sidecar --cwd "C:\Projects\copy-cat"
+amail register aim-connect --driver tmux --tmux-session aim-connect --cwd ~/aim-connect
+amail register backend-dev --driver opencode-http --http-url http://127.0.0.1:4096
 
 # Send an operator-approved message with a file ref and immediate wake
-aim-mail send \
+amail send \
   --from aim-joshua \
-  --to copy-cat \
+  --to aim-connect \
+  --reply-to aim-joshua \
   --subject "Schema check" \
   --body "Please validate ep02 manifest structure." \
   --ref specs/ep02.json \
@@ -151,13 +164,13 @@ aim-mail send \
   --wake
 
 # Recipient reads, replies (auto-incrementing hop_count & ACKing parent), or ACKs
-aim-mail inbox copy-cat --state active
-aim-mail read copy-cat --claim
-aim-mail reply copy-cat <msg_id> --body "Verified: schema passes validation."
+amail inbox aim-connect --state active
+amail read aim-connect --claim
+amail reply aim-connect <msg_id> --body "Verified: schema passes validation. DO NOT reply."
 
 # Or run a single-pass / continuous zero-LLM dispatcher sweep
-aim-mail pulse
-aim-mail watch --interval 1.5
+amail pulse
+amail watch --interval 1.5
 ```
 
 ### 2. Priority Lanes & `--coalesce-key` Batching (`v0.2.0`)
@@ -235,7 +248,7 @@ aim-mail install-agy-sidecar --uninstall
 
 ---
 
-## CLI Reference (15 Subcommands)
+## CLI Reference (15 Subcommands — `amail` / `aim-mail`)
 
 | Command | Purpose |
 | :--- | :--- |

@@ -1,8 +1,8 @@
-"""aim-mailbox: Zero-daemon, zero-LLM local Maildir post office and wake dispatcher."""
+"""aim-mailbox — A-Mail (amail / aim-mail): Zero-daemon, zero-LLM local Maildir post office and wake dispatcher."""
 
 from __future__ import annotations
 
-__version__ = "0.2.2"
+__version__ = "0.3.0"
 
 from .dispatcher import pulse_mailbox, watch_mailbox
 from .drivers import DRIVER_NAMES, check_driver_host_affinity, install_agy_sidecar, uninstall_agy_sidecar

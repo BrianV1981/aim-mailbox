@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Ultra-fast (<2ms) empty-inbox fast-path for turn-boundary `check <agent> --inject --quiet`
+_aim_fast_empty_check() {
+    local saw_check=0 inject=0 quiet=0 agent="" mb="${AIM_MAILBOX_DIR:-}" expect_mb=0
+    local arg
+    for arg in "$@"; do
+        if [ "$expect_mb" -eq 1 ]; then
+            mb="$arg"
+            expect_mb=0
+            continue
+        fi
+        case "$arg" in
+            --mailbox-dir) expect_mb=1 ;;
+            --mailbox-dir=*) mb="${arg#--mailbox-dir=}" ;;
+            check)
+                if [ "$saw_check" -eq 0 ]; then saw_check=1; else return 1; fi
+                ;;
+            --inject)
+                if [ "$saw_check" -eq 1 ]; then inject=1; else return 1; fi
+                ;;
+            --quiet)
+                if [ "$saw_check" -eq 1 ]; then quiet=1; else return 1; fi
+                ;;
+            -*) return 1 ;;
+            *)
+                if [ "$saw_check" -eq 1 ] && [ -z "$agent" ]; then
+                    agent="$arg"
+                else
+                    return 1
+                fi
+                ;;
+        esac
+    done
+    [ "$expect_mb" -eq 0 ] && [ "$saw_check" -eq 1 ] && [ "$inject" -eq 1 ] && [ "$quiet" -eq 1 ] || return 1
+    [ -n "$agent" ] && [ "${#agent}" -le 64 ] || return 1
+    case "$agent" in
+        [a-z0-9]*) ;;
+        *) return 1 ;;
+    esac
+    case "$agent" in
+        *..*|*[!a-z0-9_.-]*) return 1 ;;
+    esac
+    [ "${agent%.}" = "$agent" ] || return 1
+    case "$agent" in
+        con|prn|aux|nul|com[1-9]|lpt[1-9]|con.*|prn.*|aux.*|nul.*|com[1-9].*|lpt[1-9].*) return 1 ;;
+    esac
+    [ -n "$mb" ] || mb="${HOME}/.aim/mailbox"
+    local unread_dir="${mb}/boxes/${agent}/unread"
+    if [ ! -e "$unread_dir" ]; then
+        return 0
+    fi
+    if [ -d "$unread_dir" ]; then
+        local f
+        for f in "$unread_dir"/*.json; do
+            [ -e "$f" ] && return 1
+        done
+        return 0
+    fi
+    return 1
+}
+
+if _aim_fast_empty_check "$@"; then
+    exit 0
+fi
+
+SOURCE_PATH="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE_PATH" ]; do
+    LINK_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+    SOURCE_PATH="$(readlink "$SOURCE_PATH")"
+    [[ "$SOURCE_PATH" != /* ]] && SOURCE_PATH="${LINK_DIR}/${SOURCE_PATH}"
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE_PATH")" && pwd)"
+REPO_ROOT="$(cd -P "${SCRIPT_DIR}/.." && pwd)"
+export PYTHONPATH="${REPO_ROOT}/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 -S "${REPO_ROOT}/src/aim_mailbox/__main__.py" "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python -S "${REPO_ROOT}/src/aim_mailbox/__main__.py" "$@"
+else
+    echo "[ERROR] python3 (3.10+) is required on PATH." >&2
+    exit 1
+fi

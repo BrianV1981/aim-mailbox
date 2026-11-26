@@ -18,14 +18,16 @@ def _resolve_aim_bin(aim_bin: str | None = None) -> str:
         return aim_bin
     repo_root = Path(__file__).resolve().parent.parent.parent
     if os.name == "nt":
-        win_shim = repo_root / "bin" / "aim-mail.cmd"
-        if win_shim.is_file():
-            return str(win_shim)
+        for name in ("amail.cmd", "aim-mail.cmd"):
+            win_shim = repo_root / "bin" / name
+            if win_shim.is_file():
+                return str(win_shim)
     else:
-        posix_shim = repo_root / "bin" / "aim-mail"
-        if posix_shim.is_file():
-            return str(posix_shim)
-    return shutil.which("aim-mail") or "aim-mail"
+        for name in ("amail", "aim-mail"):
+            posix_shim = repo_root / "bin" / name
+            if posix_shim.is_file():
+                return str(posix_shim)
+    return shutil.which("amail") or shutil.which("aim-mail") or "aim-mail"
 
 
 def _quote_cmd_part(part: str) -> str:
@@ -67,7 +69,7 @@ def _read_json_object(path: Path) -> dict[str, Any]:
 def _is_aim_mailbox_command(cmd: Any) -> bool:
     if not isinstance(cmd, str):
         return False
-    return "aim-mail" in cmd and "check" in cmd and "--inject" in cmd
+    return ("aim-mail" in cmd or "amail" in cmd) and "check" in cmd and "--inject" in cmd
 
 
 def _resolve_target_path(

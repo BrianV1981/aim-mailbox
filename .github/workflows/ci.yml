@@ -35,7 +35,9 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           ./bin/aim-mail --version
-          ./bin/aim-mail describe
+          ./bin/amail --version
+          ./bin/amail describe
+          amail --help
           aim-mail --help
 
       - name: Verify zero-install shims & CLI (Windows PowerShell & CMD)
@@ -43,8 +45,11 @@ jobs:
         shell: pwsh
         run: |
           .\bin\aim-mail.ps1 --version
-          .\bin\aim-mail.ps1 describe
+          .\bin\amail.ps1 --version
+          .\bin\amail.ps1 describe
           cmd /c "bin\aim-mail.cmd --version"
+          cmd /c "bin\amail.cmd --version"
+          amail --help
           aim-mail --help
 
       - name: Run Pytest Suite

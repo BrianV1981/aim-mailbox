@@ -528,6 +528,9 @@ def cmd_describe(_args: argparse.Namespace) -> int:
 
     spec = {
         "name": "aim-mail",
+        "brand": "A-Mail",
+        "aliases": ["amail", "aim-mail"],
+        "skill": "aim-mail",
         "version": __version__,
         "drivers": list(DRIVER_NAMES),
         "harnesses": list(HARNESS_NAMES),
@@ -575,11 +578,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Mailbox root directory (default: $AIM_MAILBOX_DIR or ~/.aim/mailbox)",
     )
 
+    invoked = os.path.basename(sys.argv[0] or "").lower()
+    prog_name = "amail" if invoked in ("amail", "amail.cmd", "amail.ps1", "amail.exe") else "aim-mail"
     parser = argparse.ArgumentParser(
-        prog="aim-mail",
-        description="Zero-daemon, zero-LLM local Maildir post office and cross-OS wake dispatcher for AI agents.",
+        prog=prog_name,
+        description="A-Mail (amail / aim-mail): Zero-daemon, zero-LLM local Maildir post office and cross-OS wake dispatcher for AI agents.",
     )
-    parser.add_argument("--version", action="version", version=f"aim-mail {__version__}")
+    parser.add_argument("--version", action="version", version=f"A-Mail (amail / aim-mail) {__version__}")
     parser.add_argument(
         "--mailbox-dir",
         default=None,

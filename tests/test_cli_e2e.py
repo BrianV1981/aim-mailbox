@@ -299,6 +299,9 @@ def test_wake_fails_closed_for_unregistered_passive_and_unapproved_targets(tmp_p
 def test_zero_install_launcher_shims(tmp_path: Path) -> None:
     if os.name == "nt":
         cmd_shim = REPO_ROOT / "bin" / "aim-mail.cmd"
+        amail_cmd_shim = REPO_ROOT / "bin" / "amail.cmd"
+        amail_ps1_shim = REPO_ROOT / "bin" / "amail.ps1"
+        assert amail_ps1_shim.is_file()
         res = subprocess.run(
             ["cmd.exe", "/c", str(cmd_shim), "--version"],
             cwd=str(tmp_path),
@@ -310,8 +313,38 @@ def test_zero_install_launcher_shims(tmp_path: Path) -> None:
         assert res.returncode == 0
         assert aim_mailbox.__version__ in res.stdout
 
+        res_amail = subprocess.run(
+            ["cmd.exe", "/c", str(amail_cmd_shim), "--version"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert res_amail.returncode == 0
+        assert res_amail.stdout == res.stdout
+
+        desc_aim = subprocess.run(
+            ["cmd.exe", "/c", str(cmd_shim), "describe"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        desc_amail = subprocess.run(
+            ["cmd.exe", "/c", str(amail_cmd_shim), "describe"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert desc_aim.returncode == 0 and desc_amail.returncode == 0
+        assert json.loads(desc_aim.stdout) == json.loads(desc_amail.stdout)
+
         res_fail = subprocess.run(
-            ["cmd.exe", "/c", str(cmd_shim), "inbox", "../bad", "--mailbox-dir", str(tmp_path / "mb")],
+            ["cmd.exe", "/c", str(amail_cmd_shim), "inbox", "../bad", "--mailbox-dir", str(tmp_path / "mb")],
             cwd=str(tmp_path),
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -321,6 +354,7 @@ def test_zero_install_launcher_shims(tmp_path: Path) -> None:
         assert res_fail.returncode != 0
     else:
         sh_shim = REPO_ROOT / "bin" / "aim-mail"
+        amail_shim = REPO_ROOT / "bin" / "amail"
         res = subprocess.run(
             ["bash", str(sh_shim), "--version"],
             cwd=str(tmp_path),
@@ -332,8 +366,38 @@ def test_zero_install_launcher_shims(tmp_path: Path) -> None:
         assert res.returncode == 0
         assert aim_mailbox.__version__ in res.stdout
 
+        res_amail = subprocess.run(
+            ["bash", str(amail_shim), "--version"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert res_amail.returncode == 0
+        assert res_amail.stdout == res.stdout
+
+        desc_aim = subprocess.run(
+            ["bash", str(sh_shim), "describe"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        desc_amail = subprocess.run(
+            ["bash", str(amail_shim), "describe"],
+            cwd=str(tmp_path),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert desc_aim.returncode == 0 and desc_amail.returncode == 0
+        assert json.loads(desc_aim.stdout) == json.loads(desc_amail.stdout)
+
         res_fail = subprocess.run(
-            ["bash", str(sh_shim), "inbox", "../bad", "--mailbox-dir", str(tmp_path / "mb")],
+            ["bash", str(amail_shim), "inbox", "../bad", "--mailbox-dir", str(tmp_path / "mb")],
             cwd=str(tmp_path),
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -342,21 +406,22 @@ def test_zero_install_launcher_shims(tmp_path: Path) -> None:
         )
         assert res_fail.returncode != 0
 
-        # Regression (#2): invoking via an external symlink (e.g. ~/.local/bin/aim-mail) must resolve REPO_ROOT
+        # Regression (#2 + #19): invoking via external symlinks (~/.local/bin/{aim-mail,amail}) must resolve REPO_ROOT
         ext_bin = tmp_path / "local_bin"
         ext_bin.mkdir()
-        sym = ext_bin / "aim-mail"
-        sym.symlink_to(sh_shim)
-        res_sym = subprocess.run(
-            [str(sym), "--version"],
-            cwd=str(tmp_path),
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-        assert res_sym.returncode == 0
-        assert aim_mailbox.__version__ in res_sym.stdout
+        for name, target in (("aim-mail", sh_shim), ("amail", amail_shim)):
+            sym = ext_bin / name
+            sym.symlink_to(target)
+            res_sym = subprocess.run(
+                [str(sym), "--version"],
+                cwd=str(tmp_path),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            assert res_sym.returncode == 0
+            assert aim_mailbox.__version__ in res_sym.stdout
 
 
 def test_no_hardcoded_host_paths_in_repo() -> None:
@@ -364,6 +429,7 @@ def test_no_hardcoded_host_paths_in_repo() -> None:
     scan_roots = [
         REPO_ROOT / "src",
         REPO_ROOT / "bin",
+        REPO_ROOT / "skills",
         REPO_ROOT / "tests",
         REPO_ROOT / "memory-wiki",
         REPO_ROOT / "README.md",
@@ -763,3 +829,45 @@ def test_cli_cross_os_wake_fail_closed_and_allow_deferred_e2e(tmp_path: Path) ->
     )
     assert r_passive_defer.returncode == 2
     assert "passive driver 'none'" in r_passive_defer.stderr
+
+
+def test_amail_alias_parity_and_canonical_skill_bundle(tmp_path: Path) -> None:
+    from aim_mailbox.hooks import install_hooks, uninstall_hooks
+
+    pyproject_txt = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    assert 'amail = "aim_mailbox.cli:main"' in pyproject_txt
+    assert 'aim-mail = "aim_mailbox.cli:main"' in pyproject_txt
+
+    for shim in ("amail", "amail.cmd", "amail.ps1", "aim-mail", "aim-mail.cmd", "aim-mail.ps1"):
+        assert (REPO_ROOT / "bin" / shim).is_file(), f"missing launcher shim bin/{shim}"
+
+    r_desc = _run_cli("describe")
+    assert r_desc.returncode == 0
+    desc = json.loads(r_desc.stdout)
+    assert desc["brand"] == "A-Mail"
+    assert desc["aliases"] == ["amail", "aim-mail"]
+    assert desc["skill"] == "aim-mail"
+    assert len(desc["commands"]) <= 15
+
+    r_help = _run_cli("--help")
+    assert r_help.returncode == 0
+    assert "A-Mail (amail / aim-mail)" in r_help.stdout
+
+    agents_md = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "## 8c. THE A-MAIL PROTOCOL (INTER-AGENT COMMUNICATION)" in agents_md
+    for token in ("amail", "aim-mail", "--operator-approved", "max_hops=1", "DND"):
+        assert token in agents_md
+
+    skill_md = REPO_ROOT / "skills" / "aim-mail" / "SKILL.md"
+    assert skill_md.is_file()
+    skill_txt = skill_md.read_text(encoding="utf-8")
+    assert "name: aim-mail" in skill_txt
+    for token in ("A-Mail", "amail", "aim-mail", "aim-mailbox", "aim-communicate", "--driver tmux", "--operator-approved"):
+        assert token in skill_txt
+    assert "tmux_send.sh" not in skill_txt
+
+    # Verify hooks installed with aim_bin="amail" deduplicate and uninstall cleanly on Codex
+    codex_cfg = tmp_path / "codex_amail"
+    install_hooks(harness="codex", agent_id="w-amail", config_dir=codex_cfg, aim_bin="amail")
+    un_res = uninstall_hooks(harness="codex", agent_id="w-amail", config_dir=codex_cfg)
+    assert un_res["uninstalled"] is True
