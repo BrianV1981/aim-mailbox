@@ -689,3 +689,77 @@ def test_cli_register_clear_session_id_and_auto_cwd_target(tmp_path: Path) -> No
     assert "session_id" not in json.loads(r_clr.stdout)
     r_list_2 = _run_cli("agents", "--mailbox-dir", mb)
     assert "target=auto(cwd)" in r_list_2.stdout
+
+
+def test_cli_cross_os_wake_fail_closed_and_allow_deferred_e2e(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+    clean_env = {"ANTIGRAVITY_LS_ADDRESS": ""}
+
+    # 1. agy-desktop-sidecar target without ANTIGRAVITY_LS_ADDRESS fails closed (rc=2) with SIDECAR_CONTEXT_REQUIRED
+    assert (
+        _run_cli(
+            "register", "sidecar-peer",
+            "--driver", "agy-desktop-sidecar",
+            "--cwd", r"C:\Projects\joshua",
+            "--mailbox-dir", mb,
+        ).returncode
+        == 0
+    )
+    r_sc_fail = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "wsl-lead", "--to", "sidecar-peer",
+        "--body", "wake without sidecar env",
+        "--operator-approved", "--wake",
+        env_extra=clean_env,
+    )
+    assert r_sc_fail.returncode == 2
+    assert "SIDECAR_CONTEXT_REQUIRED" in r_sc_fail.stderr
+    assert "passive driver 'none'" not in r_sc_fail.stderr
+
+    # Envelope stays in unread/ with attempts == 0
+    r_inb = _run_cli("inbox", "sidecar-peer", "--state", "unread", "--mailbox-dir", mb, "--json")
+    msgs = json.loads(r_inb.stdout)["messages"]
+    assert len(msgs) == 1
+    assert msgs[0]["attempts"] == 0
+
+    # With --allow-deferred, remote sidecar target exits 0 cleanly
+    r_sc_ok = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "wsl-lead", "--to", "sidecar-peer",
+        "--body", "queued for sidecar watcher",
+        "--operator-approved", "--wake", "--allow-deferred",
+        env_extra=clean_env,
+    )
+    assert r_sc_ok.returncode == 0
+
+    # 2. Opposite-OS CLI cwd fails closed (rc=2) with HOST_MISMATCH (not passive driver 'none')
+    opposite_cwd = "/opt/posix/only" if os.name == "nt" else r"C:\Projects\win-only"
+    assert (
+        _run_cli(
+            "register", "foreign-cli",
+            "--driver", "codex-cli",
+            "--cwd", opposite_cwd,
+            "--mailbox-dir", mb,
+        ).returncode
+        == 0
+    )
+    r_host_fail = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "local-peer", "--to", "foreign-cli",
+        "--body", "cross-os wake",
+        "--operator-approved", "--wake",
+    )
+    assert r_host_fail.returncode == 2
+    assert "HOST_MISMATCH" in r_host_fail.stderr
+    assert "passive driver 'none'" not in r_host_fail.stderr
+
+    # 3. Passive driver 'none' MUST still fail closed (rc=2) even when --allow-deferred is passed
+    assert _run_cli("register", "passive-only", "--driver", "none", "--mailbox-dir", mb).returncode == 0
+    r_passive_defer = _run_cli(
+        "send", "--mailbox-dir", mb,
+        "--from", "local-peer", "--to", "passive-only",
+        "--body", "no watcher can wake none",
+        "--operator-approved", "--wake", "--allow-deferred",
+    )
+    assert r_passive_defer.returncode == 2
+    assert "passive driver 'none'" in r_passive_defer.stderr

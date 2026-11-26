@@ -5,7 +5,7 @@ import sys
 import time
 from typing import Any
 
-from .drivers import ASYNC_WAKE_DRIVERS, dispatch_wake
+from .drivers import ASYNC_WAKE_DRIVERS, check_driver_host_affinity, dispatch_wake
 from .store import (
     PRIORITY_RANK,
     MailboxStore,
@@ -126,11 +126,26 @@ def pulse_mailbox(
 
     for aid, cfg in sorted(targets.items()):
         try:
-            store.reclaim_expired_claims(aid, lease_seconds=lease_seconds)
             driver = str(cfg.get("driver") or "none").strip()
             if driver == "none":
+                store.reclaim_expired_claims(aid, lease_seconds=lease_seconds)
                 summary["skipped"].append({"agent_id": aid, "reason": "PASSIVE_DRIVER"})
                 continue
+
+            if not dry_run:
+                affinity = check_driver_host_affinity(cfg)
+                if affinity is not None:
+                    summary["skipped"].append(
+                        {
+                            "agent_id": aid,
+                            "driver": driver,
+                            "reason": affinity["reason"],
+                            "detail": affinity["detail"],
+                        }
+                    )
+                    continue
+
+            store.reclaim_expired_claims(aid, lease_seconds=lease_seconds)
 
             unread = store.list_inbox(aid, state="unread")
             if not unread:

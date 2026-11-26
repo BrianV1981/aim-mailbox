@@ -20,6 +20,8 @@ from aim_mailbox.drivers import (
     _resolve_agentapi_prefix,
     build_tmux_doorbell,
     build_wake_prompt,
+    check_driver_host_affinity,
+    dispatch_wake,
     install_agy_sidecar,
     is_agy_session_idle,
     resolve_latest_agy_session,
@@ -169,11 +171,24 @@ def test_agy_desktop_sidecar_driver_and_installer(tmp_path: Path, monkeypatch: p
         operator_approved=True,
     )
 
-    # Without ANTIGRAVITY_LS_ADDRESS, delivery fails cleanly and returns to unread/
+    # Without ANTIGRAVITY_LS_ADDRESS, direct driver call fails cleanly while pulse_mailbox skips without burning attempts
     monkeypatch.delenv("ANTIGRAVITY_LS_ADDRESS", raising=False)
-    s_fail = pulse_mailbox(store)
-    assert len(s_fail["failed"]) == 1
-    assert len(store.list_inbox("win-desktop", state="unread")) == 1
+    cfg_direct = store.get_agent("win-desktop")
+    assert cfg_direct is not None
+    unread_before = store.list_inbox("win-desktop", state="unread")
+    direct_res = dispatch_wake(cfg_direct, unread_before, mailbox_dir=store.root)
+    assert direct_res["status"] == "FAILED"
+    assert "ANTIGRAVITY_LS_ADDRESS" in direct_res["stderr"]
+
+    for _ in range(4):
+        s_skip = pulse_mailbox(store)
+        assert s_skip["dispatched"] == []
+        assert s_skip["failed"] == []
+        assert len(s_skip["skipped"]) == 1
+        assert s_skip["skipped"][0]["reason"] == "SIDECAR_CONTEXT_REQUIRED"
+    unread_after_skips = store.list_inbox("win-desktop", state="unread")
+    assert len(unread_after_skips) == 1
+    assert unread_after_skips[0]["attempts"] == 0
 
     # Inside Sidecar (ANTIGRAVITY_LS_ADDRESS present), succeeds and stays readable in claimed/ until read
     monkeypatch.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:55555")
@@ -984,4 +999,98 @@ def test_agy_cwd_auto_session_resolution_across_handoffs(
     assert "conv-cli-1" in s_cli_ok["dispatched"][0]["result"]["command"]
     cli_cfg = store.get_agent("cli-proj")
     assert cli_cfg is not None and "session_id" not in cli_cfg
+
+
+def test_cross_os_watcher_host_affinity_never_claims_or_quarantines_foreign_queues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake_agentapi = _make_fake_cli(
+        tmp_path,
+        "fake_agentapi_affinity",
+        "import json, sys\nprint(json.dumps({'response': {'sendMessage': {'recipientId': sys.argv[2]}}}))\n",
+    )
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent("wsl-tmux", driver="tmux", tmux_session="aim-mailbox", cwd="/opt/wsl/aim-mailbox")
+    store.register_agent("wsl-cli", driver="agy-cli", cwd="/opt/wsl/aim-auditor")
+    store.register_agent("wsl-cmd", driver="command", command=["/usr/local/bin/wsl_hook.sh"], cwd="/opt/wsl/aim-connect")
+    store.register_agent(
+        "win-sidecar",
+        driver="agy-desktop-sidecar",
+        cwd=r"C:\Projects\joshua",
+        session_id="win-conv-1",
+        binary=str(fake_agentapi),
+    )
+
+    for target in ("wsl-tmux", "wsl-cli", "wsl-cmd", "win-sidecar"):
+        store.send_envelope(
+            from_agent="peer",
+            to_agent=target,
+            body=f"hello {target}",
+            ack_required=False,
+            operator_approved=True,
+        )
+
+    # 1. Simulate Windows 11 Sidecar running 5 watch cycles across shared agents.json
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "name", "nt")
+        mp.setattr(shutil, "which", lambda _name: None)
+        mp.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:55555")
+
+        for cycle in range(5):
+            s_win = pulse_mailbox(store)
+            assert s_win["failed"] == []
+            assert s_win["quarantined"] == []
+            if cycle == 0:
+                assert [d["agent_id"] for d in s_win["dispatched"]] == ["win-sidecar"]
+            else:
+                assert s_win["dispatched"] == []
+            skipped_map = {s["agent_id"]: s["reason"] for s in s_win["skipped"]}
+            assert skipped_map == {
+                "wsl-tmux": "HOST_MISMATCH",
+                "wsl-cli": "HOST_MISMATCH",
+                "wsl-cmd": "HOST_MISMATCH",
+            }
+
+    # WSL2 queues must remain 100% untouched in unread/ with attempts == 0 (never moved to dead/)
+    for wsl_agent in ("wsl-tmux", "wsl-cli", "wsl-cmd"):
+        unread_items = store.list_inbox(wsl_agent, state="unread")
+        assert len(unread_items) == 1
+        assert unread_items[0]["attempts"] == 0
+        assert store.list_inbox(wsl_agent, state="dead") == []
+
+    # 2. Simulate POSIX/WSL2 sweeping Windows-affiliated agents across 5 cycles
+    store2 = MailboxStore(tmp_path / "mailbox_posix")
+    store2.register_agent("win-desktop-2", driver="agy-desktop-sidecar", cwd=r"C:\Projects\joshua", session_id="win-conv-2")
+    store2.register_agent("win-cli-2", driver="codex-cli", cwd=r"C:\Projects\copy-cat")
+    store2.register_agent("win-cmd-2", driver="command", command=[r"C:\Tools\notify.exe"], cwd=r"C:\Projects\copy-cat")
+    for target in ("win-desktop-2", "win-cli-2", "win-cmd-2"):
+        store2.send_envelope(from_agent="wsl-peer", to_agent=target, body="ping win", operator_approved=True)
+
+    with monkeypatch.context() as mp:
+        mp.setattr(os, "name", "posix")
+        mp.delenv("ANTIGRAVITY_LS_ADDRESS", raising=False)
+        for _ in range(5):
+            s_posix = pulse_mailbox(store2)
+            assert s_posix["dispatched"] == []
+            assert s_posix["failed"] == []
+            assert s_posix["quarantined"] == []
+            skipped_posix = {s["agent_id"]: s["reason"] for s in s_posix["skipped"]}
+            assert skipped_posix == {
+                "win-desktop-2": "SIDECAR_CONTEXT_REQUIRED",
+                "win-cli-2": "HOST_MISMATCH",
+                "win-cmd-2": "HOST_MISMATCH",
+            }
+
+        # Even if a Linux Desktop Sidecar sets ANTIGRAVITY_LS_ADDRESS on POSIX, Windows drive cwd skips as HOST_MISMATCH
+        mp.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:44444")
+        assert check_driver_host_affinity(store2.get_agent("win-desktop-2") or {}, host_os="posix") == {
+            "reason": "HOST_MISMATCH",
+            "detail": "cwd 'C:\\\\Projects\\\\joshua' is a Windows path on POSIX host",
+        }
+
+    for win_agent in ("win-desktop-2", "win-cli-2", "win-cmd-2"):
+        unread_win = store2.list_inbox(win_agent, state="unread")
+        assert len(unread_win) == 1
+        assert unread_win[0]["attempts"] == 0
+        assert store2.list_inbox(win_agent, state="dead") == []
 

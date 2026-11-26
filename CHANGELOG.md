@@ -2,6 +2,11 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.2.2] - 2026-11-25
+
+### Fixed
+- **Cross-OS Shared-Mailbox Watcher Host-Affinity Guard (`#18`):** Added `check_driver_host_affinity()` in `src/aim_mailbox/drivers.py` and pre-claim skipping in `pulse_mailbox()` (`src/aim_mailbox/dispatcher.py`) so Windows 11 Sidecar `watch` and POSIX/WSL2 `pulse`/`watch` sharing one `AIM_MAILBOX_DIR` (`agents.json`) never claim, fail, or quarantine envelopes belonging to opposite-OS drivers (`tmux` and pure-POSIX `cwd`/binaries on Windows; `agy-desktop-sidecar` without `ANTIGRAVITY_LS_ADDRESS` and Windows `<drive>:\` `cwd`/binaries on POSIX). Updated `_evaluate_wake_exit_code()` in `src/aim_mailbox/cli.py` to report `HOST_MISMATCH` and `SIDECAR_CONTEXT_REQUIRED` distinctly from `PASSIVE_DRIVER` (`driver=none`) while leaving `unread/` `attempts` at `0`.
+
 ## [0.2.1] - 2026-11-25
 
 ### Added

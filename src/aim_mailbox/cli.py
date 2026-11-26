@@ -116,16 +116,41 @@ def _evaluate_wake_exit_code(
     if wake_summary.get("failed"):
         return 1
     deferred = wake_summary.get("deferred") or []
+    skipped = wake_summary.get("skipped") or []
     approval_blocked = [d for d in deferred if d.get("reason") == "OPERATOR_APPROVAL_REQUIRED"]
-    if allow_deferred and deferred and not approval_blocked:
+    remote_skipped = [
+        s for s in skipped if s.get("reason") in ("HOST_MISMATCH", "SIDECAR_CONTEXT_REQUIRED")
+    ]
+    hard_skipped = [
+        s for s in skipped if s.get("reason") not in ("HOST_MISMATCH", "SIDECAR_CONTEXT_REQUIRED")
+    ]
+    if allow_deferred and (deferred or remote_skipped) and not approval_blocked and not hard_skipped:
         return 0
 
     if wake_summary.get("checked_agents", 0) == 0:
         reason = f"target agent '{target_agent}' is not registered in agents.json"
     elif approval_blocked:
         reason = f"initial wake for '{target_agent}' requires --operator-approved (or agent allow_unapproved)"
-    elif wake_summary.get("skipped"):
-        reason = f"target agent '{target_agent}' has passive driver 'none'"
+    elif skipped:
+        first_skip = skipped[0]
+        skip_reason = str(first_skip.get("reason") or "SKIPPED")
+        skip_detail = str(first_skip.get("detail") or "").strip()
+        if skip_reason == "PASSIVE_DRIVER":
+            reason = f"target agent '{target_agent}' has passive driver 'none'"
+        elif skip_reason == "SIDECAR_CONTEXT_REQUIRED":
+            reason = (
+                f"target agent '{target_agent}' requires Antigravity Desktop Sidecar context "
+                f"({skip_reason}: {skip_detail or 'ANTIGRAVITY_LS_ADDRESS is unset'}); "
+                "omit --wake or pass --allow-deferred when Sidecar watch is active"
+            )
+        elif skip_reason == "HOST_MISMATCH":
+            reason = (
+                f"target agent '{target_agent}' cannot be woken from this OS host "
+                f"({skip_reason}: {skip_detail or 'cross-OS driver'}); "
+                "omit --wake or pass --allow-deferred if target host watcher is active"
+            )
+        else:
+            reason = f"wake for '{target_agent}' was skipped ({skip_reason})"
     elif wake_summary.get("quarantined"):
         reason = f"envelope for '{target_agent}' was quarantined"
     elif deferred:
@@ -389,7 +414,8 @@ def cmd_pulse(args: argparse.Namespace) -> int:
         args.json,
         [
             f"[PULSE] checked={summary['checked_agents']} dispatched={len(summary['dispatched'])} "
-            f"deferred={len(summary['deferred'])} quarantined={len(summary['quarantined'])} failed={len(summary['failed'])}"
+            f"deferred={len(summary['deferred'])} skipped={len(summary['skipped'])} "
+            f"quarantined={len(summary['quarantined'])} failed={len(summary['failed'])}"
         ],
     )
     return 1 if summary["failed"] else 0

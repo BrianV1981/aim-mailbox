@@ -8,7 +8,7 @@
 [![Platforms: Win11 | WSL2 | Linux | macOS](https://img.shields.io/badge/Platforms-Win11%20%7C%20WSL2%20%7C%20Linux%20%7C%20macOS-blue.svg)](#sharing-one-mailbox-between-native-windows-11-and-wsl2)
 [![A.I.M. Ecosystem](https://img.shields.io/badge/A.I.M.-Ecosystem-00d4ff.svg)](https://github.com/BrianV1981/aim-ecosystem)
 
-`aim-mailbox` (`v0.2.1`) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)**.
+`aim-mailbox` (`v0.2.2`) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)**.
 
 ---
 
@@ -104,7 +104,8 @@ Multi-agent coding workflows break down at three physical boundaries that most t
 - **Atomic Moves & NTFS Retry:** `write_json_atomic()` writes with `O_CREAT | O_EXCL` (`0o600`), calls `os.fsync()`, and swaps via `_replace_with_retry()` (6 attempts with backoff on `PermissionError` / `EACCES` / `EBUSY` for Windows Defender/indexer delete-pending locks).
 - **Path & Input Validation:** Agent IDs normalize to lowercase (`@Worker` → `worker`), disallow `..`, trailing `.`, path separators, and Windows reserved device names (`CON`, `NUL`, `COM1`–`COM9`, `LPT1`–`LPT9`). Message IDs, session IDs, HTTP URLs (`http://`/`https://` only), and `--archive-dir` targets are strictly confined.
 - **Busy Defer vs. Failure Quarantine:** If a target session is mid-turn (`BUSY_DEFERRED`), `release_claim(..., defer=True)` returns the envelope to `unread/` **without** decrementing `max_attempts`. Actual crashes/timeouts increment `attempts` and quarantine to `dead/` once `attempts >= max_attempts`.
-- **Fail-Closed Wake Policy:** `send --wake` and `reply --wake` exit `2` if the target is unregistered, passive (`driver=none`), missing `--operator-approved` (unless the target agent has `--allow-unapproved`), or deferred (`BUSY_DEFERRED`, `AGENT_LOCK_HELD`, `LOW_PRIORITY_BATCH_WINDOW`) without `--allow-deferred`.
+- **Cross-OS Watcher Host-Affinity Isolation (`v0.2.2`):** When Windows 11 Sidecar `watch` and WSL2/POSIX `pulse` share one `agents.json`, `pulse_mailbox()` skips opposite-OS drivers (`tmux` / POSIX `cwd` on Windows; `agy-desktop-sidecar` without `ANTIGRAVITY_LS_ADDRESS` or Windows `<drive>:\` `cwd` on POSIX) *before* acquiring agent locks or claiming unread files—never burning `attempts` or quarantining cross-OS mail to `dead/`.
+- **Fail-Closed Wake Policy:** `send --wake` and `reply --wake` exit `2` if the target is unregistered, passive (`driver=none`), missing `--operator-approved` (unless the target agent has `--allow-unapproved`), or deferred/remote-skipped (`BUSY_DEFERRED`, `AGENT_LOCK_HELD`, `LOW_PRIORITY_BATCH_WINDOW`, `HOST_MISMATCH`, `SIDECAR_CONTEXT_REQUIRED`) without `--allow-deferred`.
 
 ---
 

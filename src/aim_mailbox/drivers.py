@@ -117,6 +117,158 @@ def _normalize_workspace_key(raw: str) -> str:
     return text
 
 
+def _is_pure_posix_path(raw: str) -> bool:
+    """Return True when `raw` is a pure POSIX absolute path (`/opt/...`), excluding UNC and WSL `/mnt/<drive>`."""
+    text = (raw or "").strip()
+    if not text.startswith("/") or text.startswith("//"):
+        return False
+    if re.match(r"^/[A-Za-z]:(?:/|$)", text):
+        return False
+    if re.match(r"^/mnt/[A-Za-z](?:/|$)", text):
+        return False
+    return True
+
+
+def _is_windows_drive_path(raw: str) -> bool:
+    """Return True when `raw` is a Windows drive path (`C:\\...`, `C:/...`) or UNC path (`\\\\server\\share`)."""
+    text = (raw or "").strip()
+    if not text:
+        return False
+    return bool(re.match(r"^[A-Za-z]:(?:[\\/]|$)", text) or re.match(r"^\\\\[^\\]+", text))
+
+
+def check_driver_host_affinity(
+    agent_cfg: dict[str, Any],
+    *,
+    host_os: str | None = None,
+) -> dict[str, str] | None:
+    """
+    Check whether `agent_cfg`'s wake driver can execute on the current OS/runtime host.
+    Returns `None` when compatible, or `{"reason": <code_str>, "detail": <human_str>}` when
+    a global watcher/pulse must skip the target without claiming unread files or burning attempts.
+    """
+    driver = str(agent_cfg.get("driver") or "none").strip()
+    if driver in ("none", "opencode-http"):
+        return None
+
+    eff_os = host_os or os.name
+    raw_cwd = str(agent_cfg.get("cwd") or "").strip()
+    explicit_bin = str(agent_cfg.get("binary") or "").strip()
+    has_local_explicit_bin = bool(explicit_bin and os.path.isfile(explicit_bin))
+
+    if driver == "agy-desktop-sidecar":
+        if not os.environ.get("ANTIGRAVITY_LS_ADDRESS"):
+            return {
+                "reason": "SIDECAR_CONTEXT_REQUIRED",
+                "detail": "ANTIGRAVITY_LS_ADDRESS is unset (requires Antigravity Desktop Sidecar watch)",
+            }
+        if eff_os == "nt":
+            if explicit_bin and _is_pure_posix_path(explicit_bin) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"binary {explicit_bin!r} is a POSIX path on Windows host",
+                }
+            if raw_cwd and _is_pure_posix_path(raw_cwd) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"cwd {raw_cwd!r} is a POSIX path on Windows host",
+                }
+        else:
+            if explicit_bin and _is_windows_drive_path(explicit_bin) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"binary {explicit_bin!r} is a Windows path on POSIX host",
+                }
+            if raw_cwd and _is_windows_drive_path(raw_cwd) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"cwd {raw_cwd!r} is a Windows path on POSIX host",
+                }
+        return None
+
+    if eff_os == "nt":
+        if driver == "tmux":
+            if explicit_bin:
+                if _is_pure_posix_path(explicit_bin) and not has_local_explicit_bin:
+                    return {
+                        "reason": "HOST_MISMATCH",
+                        "detail": f"POSIX tmux binary {explicit_bin!r} is inaccessible on Windows host",
+                    }
+            elif shutil.which("tmux") is None:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": "POSIX 'tmux' driver requires tmux binary (unavailable on Windows host)",
+                }
+            return None
+
+        if driver in ("agy-cli", "grok-cli", "codex-cli", "vscode-chat"):
+            if explicit_bin and _is_pure_posix_path(explicit_bin) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"driver '{driver}' binary {explicit_bin!r} is a POSIX path on Windows host",
+                }
+            if raw_cwd and _is_pure_posix_path(raw_cwd) and not has_local_explicit_bin:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"driver '{driver}' cwd {raw_cwd!r} is a POSIX path on Windows host",
+                }
+            return None
+
+        if driver == "command":
+            raw_cmd = agent_cfg.get("command")
+            cmd0 = str(raw_cmd[0]).strip() if isinstance(raw_cmd, list) and raw_cmd else ""
+            has_local_cmd0 = bool(cmd0 and os.path.isfile(cmd0))
+            if cmd0 and _is_pure_posix_path(cmd0) and not has_local_cmd0:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"command executable {cmd0!r} is a POSIX path on Windows host",
+                }
+            if raw_cwd and _is_pure_posix_path(raw_cwd) and not has_local_cmd0:
+                return {
+                    "reason": "HOST_MISMATCH",
+                    "detail": f"command cwd {raw_cwd!r} is a POSIX path on Windows host",
+                }
+        return None
+
+    # eff_os != "nt" (POSIX: Linux, WSL2, macOS)
+    if driver == "tmux":
+        if explicit_bin and _is_windows_drive_path(explicit_bin) and not has_local_explicit_bin:
+            return {
+                "reason": "HOST_MISMATCH",
+                "detail": f"binary {explicit_bin!r} is a Windows path on POSIX host",
+            }
+        return None
+
+    if driver in ("agy-cli", "grok-cli", "codex-cli", "vscode-chat"):
+        if explicit_bin and _is_windows_drive_path(explicit_bin) and not has_local_explicit_bin:
+            return {
+                "reason": "HOST_MISMATCH",
+                "detail": f"driver '{driver}' binary {explicit_bin!r} is a Windows path on POSIX host",
+                }
+        if raw_cwd and _is_windows_drive_path(raw_cwd) and not has_local_explicit_bin:
+            return {
+                "reason": "HOST_MISMATCH",
+                "detail": f"driver '{driver}' cwd {raw_cwd!r} is a Windows path on POSIX host",
+            }
+        return None
+
+    if driver == "command":
+        raw_cmd = agent_cfg.get("command")
+        cmd0 = str(raw_cmd[0]).strip() if isinstance(raw_cmd, list) and raw_cmd else ""
+        has_local_cmd0 = bool(cmd0 and os.path.isfile(cmd0))
+        if cmd0 and _is_windows_drive_path(cmd0) and not has_local_cmd0:
+            return {
+                "reason": "HOST_MISMATCH",
+                "detail": f"command executable {cmd0!r} is a Windows path on POSIX host",
+            }
+        if raw_cwd and _is_windows_drive_path(raw_cwd) and not has_local_cmd0:
+            return {
+                "reason": "HOST_MISMATCH",
+                "detail": f"command cwd {raw_cwd!r} is a Windows path on POSIX host",
+            }
+    return None
+
+
 def resolve_latest_agy_session(
     cwd: str,
     *,
