@@ -70,4 +70,4 @@ While [Maildir & Dispatcher Architecture](maildir-and-dispatcher-architecture.md
   1. Tag mail-enabled GUI chats with a unique sidebar prefix (`[MAIL:<agent>]`).
   2. Focus the app window and verify visually that no streaming/`Stop` indicator is active.
   3. Click `[MAIL:<agent>]` in the sidebar and **verify the active canvas header matches `[MAIL:<agent>]` before pasting** (abort on mismatch).
-  4. Paste only a 4-word clipboard trigger (`Run: aim-mail inbox`), press `Enter`, and visually verify turn start while real payloads stay in Maildir JSON (see [Unified Skill Strategy (`aim-communicate` v2)](aim-communicate-v2-migration.md)).
+  4. Paste only a 4-word clipboard trigger (`Run: amail inbox`), press `Enter`, and visually verify turn start while real payloads stay in Maildir JSON (see [A-Mail Standardization & Skill Migration](aim-communicate-v2-migration.md)).

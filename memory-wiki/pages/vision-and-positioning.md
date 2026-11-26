@@ -1,7 +1,7 @@
 # Vision, Ecosystem Positioning & Lineage
 
 ## Overview
-`aim-mailbox` (`aim-mail` CLI) is a zero-daemon, zero-LLM, pure-Python stdlib local post office and wake-up router built for asynchronous inter-agent communication across heterogeneous operating systems (**Linux, WSL2, macOS, and Native Windows 11**) and heterogeneous AI coding harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex, VS Code, and Cursor**).
+**A-Mail** (`aim-mailbox`, CLI `amail` / `aim-mail`) is a zero-daemon, zero-LLM, pure-Python stdlib local post office and wake-up router built for asynchronous inter-agent communication across heterogeneous operating systems (**Linux, WSL2, macOS, and Native Windows 11**) and heterogeneous AI coding harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex, VS Code, and Cursor**).
 
 ---
 
@@ -20,7 +20,7 @@ Within the broader `aim-ecosystem`, `aim-mailbox` establishes a clean separation
 
 - **Why Not `aim-boardroom`:** `aim-boardroom` (`0` LOC spec) was originally conceived as a 4-pane visual Web UI fork of `aim-connect` layered over WSL `tmux`. Visual fleet supervision and spatial visualization have since consolidated into `aim-connect` and `aim-office`. Naming a headless CLI post office `aim-mailbox` provides an immediate Unix mental model (`aim-mail send / inbox / read / reply / ack`) without implying a group-chat UI.
 - **Superseding `aim-chalkboard`:** `aim-chalkboard` ("The Swarm Post Office") proved the asynchronous file-drop concept (`inbox/<team>/`) and mandatory read receipts, but relied on slow `git pull --rebase` commits and lacked any local wake-up dispatcher. `aim-mailbox` fulfills that post-office architecture natively on local/shared filesystems with `<5ms` zero-token dispatchers.
-- **Unifying `aim-communicate` (`v2.0`):** Rather than fracturing the fleet across two communication skills, `aim-mailbox` becomes the transport engine beneath an upgraded `aim-communicate` skill in `aim-skill-library` (see [Unified Skill Strategy (`aim-communicate` v2)](aim-communicate-v2-migration.md)).
+- **Superseding `aim-communicate` (`v0.3.0`):** Under Epic `aim-joshua#181`, A-Mail (`amail` / `aim-mail`) and canonical skill `aim-mail` completely supplant `aim-communicate` and retire standalone `tmux` paste scripts across `aim-skill-library` and all A.I.M. workspaces (see [A-Mail Standardization & Skill Migration](aim-communicate-v2-migration.md)).
 
 ---
 

@@ -65,10 +65,10 @@ Maps human/agent-friendly logical names (`aim-joshua`, `aim-auditor`, `copy-cat`
 
 ---
 
-## 3. Zero-Token Cron / Task Scheduler Dispatcher (`aim-mail pulse`)
+## 3. Zero-Token Cron / Task Scheduler Dispatcher (`amail pulse` / `aim-mail pulse`)
 Modeled after A.I.M.'s deterministic pre-flight cron pattern:
 1. **Zero-Cost Idle Path (`<5ms`):** Scheduled via POSIX `cron`, macOS `launchd`, Windows Task Scheduler (`schtasks`), or an Antigravity Desktop Sidecar loop. Scans `boxes/*/unread/*.json`; if empty, exits `0` immediately with **zero LLM invocations and zero token spend**.
 2. **Pre-Spawn Guardrails:** Before waking any target agent, Python enforces:
    - **Loop Gate:** Rejects and moves to `dead/` if `hop_count > max_hops` (default `max_hops = 1` for automated peer replies unless explicitly elevated by Operator).
    - **Busy/Lease Gate:** Checks `locks/<agent_id>.lock.json` (with stale-TTL recovery) plus harness-specific idle state (e.g., `CASCADE_RUN_STATUS_IDLE` in Antigravity `conversation_summaries.db`) so two turns never collide on the same session.
-3. **Doorbell Separation:** Wake triggers inject only a short, deterministic instruction (`You have unread mail in aim-mailbox. Run aim-mail inbox, process tasks, and ack.`), while the woken agent pulls the full structured JSON envelope and `--ref` files cleanly via its shell tool (see [Unified Skill Strategy (`aim-communicate` v2)](aim-communicate-v2-migration.md)).
+3. **Doorbell Separation:** Wake triggers inject only a short, deterministic instruction (`You have unread mail in aim-mailbox. Run amail inbox, process tasks, and ack.`), while the woken agent pulls the full structured JSON envelope and `--ref` files cleanly via its shell tool (see [A-Mail Standardization & Skill Migration](aim-communicate-v2-migration.md)).

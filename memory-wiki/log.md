@@ -1,5 +1,12 @@
 # Memory Log
 
+## [2026-11-26] ingest | Shipped `aim-mailbox` `v0.3.0` (`#19` — First-Class `amail` CLI Alias & Canonical `aim-mail` Skill)
+- Closed `BrianV1981/aim-mailbox#19` (`8f78f91`, tag `v0.3.0`, `41/41` local `pytest` + Windows 11 shim parity verified) as part of Epic `aim-joshua#181`:
+  - Added first-class `amail` CLI entrypoint alongside `aim-mail` in `pyproject.toml` `[project.scripts]` and shipped cross-OS zero-install launchers (`bin/amail`, `bin/amail.cmd`, `bin/amail.ps1`, including `<2ms` empty-inbox `check` fast-path and symlink-chain resolution).
+  - Updated `describe` (`brand: "A-Mail"`, `aliases: ["amail", "aim-mail"]`, `skill: "aim-mail"`), `--version` / `--help`, `hooks.py` (`amail` + `aim-mail` hook deduplication/uninstall), `README.md`, `CHANGELOG.md`, and `AGENTS.md` (`§8c. THE A-MAIL PROTOCOL`).
+  - Bundled canonical `skills/aim-mail/SKILL.md` (`name: aim-mail`, routing POSIX `tmux` panes exclusively through `amail` `--driver tmux` with `0` shell paste wrapper fallbacks) and added `REPO_ROOT / "skills"` to `test_no_hardcoded_host_paths_in_repo`.
+  - Installed `~/.local/bin/amail` + `~/.local/bin/aim-mail` symlinks, synced `C:\aim-mailbox` to `v0.3.0`, and respawned the Windows 11 Sidecar.
+
 ## [2026-11-26] ingest | Shipped `aim-mailbox` `v0.2.2` (`#18` — Cross-OS Watcher Host-Affinity Guard) & Live Sidecar Reload
 - Closed `BrianV1981/aim-mailbox#18` and tagged `v0.2.2` (`7d1a7fc`, `ubuntu-latest` + `windows-latest` CI `45758401701` + `gitleaks` `45758401610` green, `40/40` local `pytest`):
   - Added `check_driver_host_affinity()` (`_is_pure_posix_path()`, `_is_windows_drive_path()`) in `src/aim_mailbox/drivers.py` and pre-claim skipping in `pulse_mailbox()` (`src/aim_mailbox/dispatcher.py`) so Windows 11 Sidecar `watch` skips POSIX `tmux` and pure-POSIX `cwd`/binary targets (`HOST_MISMATCH`) while POSIX/external `pulse`/`watch` skips `agy-desktop-sidecar` without `ANTIGRAVITY_LS_ADDRESS` (`SIDECAR_CONTEXT_REQUIRED`) and Windows `<drive>:\` `cwd`/binary targets (`HOST_MISMATCH`) without claiming envelopes or burning `attempts`.
