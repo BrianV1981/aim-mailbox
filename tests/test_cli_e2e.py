@@ -659,3 +659,33 @@ def test_install_hooks_all_harnesses_and_agy_check_formats(tmp_path: Path) -> No
             samples.append((_time.perf_counter() - t0) * 1000.0)
             assert r_fast.stdout == ""
         assert min(samples) < 15.0, f"Empty check --inject --quiet exceeded 15ms: {samples}"
+
+
+def test_cli_register_clear_session_id_and_auto_cwd_target(tmp_path: Path) -> None:
+    mb = str(tmp_path / "mb")
+    r_pin = _run_cli(
+        "register", "proj-agent",
+        "--driver", "agy-desktop-sidecar",
+        "--cwd", "/opt/proj-agent",
+        "--session-id", "uuid-pinned-1",
+        "--mailbox-dir", mb,
+    )
+    assert r_pin.returncode == 0
+    r_list_1 = _run_cli("agents", "--mailbox-dir", mb)
+    assert "target=uuid-pinned-1" in r_list_1.stdout
+
+    # Conflict rejected cleanly
+    r_conflict = _run_cli(
+        "register", "proj-agent",
+        "--session-id", "uuid-2",
+        "--clear-session-id",
+        "--mailbox-dir", mb,
+    )
+    assert r_conflict.returncode == 1
+
+    # Clearing session_id switches target display to auto(cwd)
+    r_clr = _run_cli("register", "proj-agent", "--clear-session-id", "--mailbox-dir", mb, "--json")
+    assert r_clr.returncode == 0
+    assert "session_id" not in json.loads(r_clr.stdout)
+    r_list_2 = _run_cli("agents", "--mailbox-dir", mb)
+    assert "target=auto(cwd)" in r_list_2.stdout

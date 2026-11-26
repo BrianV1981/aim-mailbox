@@ -82,6 +82,113 @@ def build_tmux_doorbell(
     )
 
 
+def _normalize_workspace_key(raw: str) -> str:
+    """Normalize a local path, WSL /mnt/<drive> path, or file:// URI into a canonical workspace comparison key."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("file://"):
+        parsed = urllib.parse.urlparse(text)
+        path_part = urllib.parse.unquote(parsed.path or "")
+        if parsed.netloc and parsed.netloc.lower() != "localhost":
+            path_part = f"//{parsed.netloc}{path_part}"
+        text = path_part
+    else:
+        text = os.path.expanduser(text)
+
+    text = text.replace("\\", "/")
+    if re.match(r"^/[A-Za-z]:(?:/|$)", text):
+        text = text[1:]
+    m_wsl = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", text)
+    if m_wsl:
+        rest = m_wsl.group(2) or ""
+        text = f"{m_wsl.group(1)}:/{rest}" if rest else f"{m_wsl.group(1)}:/"
+
+    if text.startswith("//"):
+        text = "//" + re.sub(r"/+", "/", text[2:])
+    else:
+        text = re.sub(r"/+", "/", text)
+
+    if len(text) > 1 and not re.match(r"^[A-Za-z]:/$", text):
+        text = text.rstrip("/")
+
+    if re.match(r"^[A-Za-z]:(?:/|$)", text):
+        text = text.lower()
+    return text
+
+
+def resolve_latest_agy_session(
+    cwd: str,
+    *,
+    driver: str = "agy-desktop-sidecar",
+    summary_db: str | None = None,
+    home_dir: Path | None = None,
+) -> str | None:
+    """Resolve the most recently modified top-level Antigravity conversation_id matching `cwd`."""
+    target_key = _normalize_workspace_key(cwd)
+    if not target_key:
+        return None
+
+    home = home_dir or Path.home()
+    if summary_db:
+        candidates = [Path(summary_db).expanduser()]
+    elif driver == "agy-desktop-sidecar":
+        candidates = [
+            home / ".gemini" / "antigravity" / "conversation_summaries.db",
+            home / ".gemini" / "antigravity-ide" / "conversation_summaries.db",
+        ]
+    else:
+        candidates = [
+            home / ".gemini" / "antigravity-cli" / "conversation_summaries.db",
+            home / ".gemini" / "antigravity" / "conversation_summaries.db",
+        ]
+
+    for db_path in candidates:
+        if not db_path.is_file():
+            continue
+        for attempt in range(3):
+            try:
+                conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=3.0)
+                try:
+                    cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(conversation_summaries)").fetchall()}
+                    if "conversation_id" not in cols or "workspace_uris" not in cols:
+                        break
+                    where_parts: list[str] = []
+                    if "nesting_depth" in cols:
+                        where_parts.append("COALESCE(nesting_depth, 0) = 0")
+                    if "killed" in cols:
+                        where_parts.append("COALESCE(killed, 0) = 0")
+                    where_sql = f" WHERE {' AND '.join(where_parts)}" if where_parts else ""
+                    order_sql = "last_modified_time DESC" if "last_modified_time" in cols else "rowid DESC"
+                    rows = conn.execute(
+                        f"SELECT conversation_id, workspace_uris FROM conversation_summaries{where_sql} ORDER BY {order_sql}"
+                    ).fetchall()
+                finally:
+                    conn.close()
+
+                for row in rows:
+                    raw_cid = str(row[0] or "").strip()
+                    raw_uris = str(row[1] or "").strip()
+                    if not raw_cid or not raw_uris:
+                        continue
+                    try:
+                        parsed_uris = json.loads(raw_uris)
+                        uri_list = [str(u) for u in parsed_uris] if isinstance(parsed_uris, list) else [raw_uris]
+                    except json.JSONDecodeError:
+                        uri_list = [raw_uris]
+                    if any(_normalize_workspace_key(u) == target_key for u in uri_list):
+                        return validate_session_id(raw_cid)
+                break
+            except sqlite3.OperationalError:
+                if attempt + 1 < 3:
+                    time.sleep(0.03)
+                    continue
+                break
+            except (sqlite3.Error, MailboxError):
+                break
+    return None
+
+
 def is_agy_session_idle(session_id: str, summary_db: str | None = None, home_dir: Path | None = None) -> bool:
     clean_sid = validate_session_id(session_id)
     home = home_dir or Path.home()
@@ -343,18 +450,40 @@ def _dispatch_wake_inner(
         }
 
     if driver == "agy-desktop-sidecar":
-        if not session_id:
+        resolved_dynamically = False
+        target_sid = session_id
+        if not target_sid and cwd:
+            target_sid = resolve_latest_agy_session(
+                str(cwd),
+                driver=driver,
+                summary_db=agent_cfg.get("summary_db"),
+            )
+            resolved_dynamically = target_sid is not None
+        if not target_sid:
+            if dry_run and cwd:
+                prefix = _resolve_agentapi_prefix(agent_cfg.get("binary"))
+                cmd = [*prefix, "send-message", f"<auto:{cwd}>", prompt]
+                return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
+            err_detail = (
+                f"No active Antigravity Desktop conversation found for workspace {cwd!r} in conversation_summaries.db "
+                "(open the project in Antigravity Desktop or pass --session-id)."
+                if cwd
+                else f"Agent '{agent_id}' with driver 'agy-desktop-sidecar' requires --cwd (<workspace>) or --session-id (<conversation_id>)."
+            )
             return {
                 "status": "FAILED",
                 "driver": driver,
                 "returncode": 1,
-                "stderr": f"Agent '{agent_id}' with driver 'agy-desktop-sidecar' requires --session-id (<conversation_id>).",
+                "stderr": err_detail,
                 "delivered_at": utc_iso(),
             }
         prefix = _resolve_agentapi_prefix(agent_cfg.get("binary"))
-        cmd = [*prefix, "send-message", session_id, prompt]
+        cmd = [*prefix, "send-message", target_sid, prompt]
         if dry_run:
-            return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
+            out_dry: dict[str, Any] = {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
+            if resolved_dynamically:
+                out_dry["resolved_session_id"] = target_sid
+            return out_dry
         if not os.environ.get("ANTIGRAVITY_LS_ADDRESS"):
             return {
                 "status": "FAILED",
@@ -367,8 +496,9 @@ def _dispatch_wake_inner(
                 ),
                 "delivered_at": utc_iso(),
             }
-        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
-        return {
+        run_cwd = str(cwd) if (cwd and os.path.isdir(str(cwd))) else None
+        res = _run_capture(cmd, cwd=run_cwd, timeout=timeout)
+        out_res: dict[str, Any] = {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
             "command": cmd,
@@ -377,38 +507,60 @@ def _dispatch_wake_inner(
             "stderr": res.stderr,
             "delivered_at": utc_iso(),
         }
+        if resolved_dynamically:
+            out_res["resolved_session_id"] = target_sid
+        return out_res
 
     if driver == "agy-cli":
-        if session_id and not is_agy_session_idle(session_id, summary_db=agent_cfg.get("summary_db")):
-            return {
+        resolved_dynamically = False
+        target_sid = session_id
+        if not target_sid and cwd:
+            target_sid = resolve_latest_agy_session(
+                str(cwd),
+                driver=driver,
+                summary_db=agent_cfg.get("summary_db"),
+            )
+            resolved_dynamically = target_sid is not None
+        if target_sid and not is_agy_session_idle(target_sid, summary_db=agent_cfg.get("summary_db")):
+            busy_out: dict[str, Any] = {
                 "status": "BUSY_DEFERRED",
                 "driver": driver,
                 "session_id": session_id,
-                "stderr": f"Session {session_id} is currently active (not_fully_idle); deferring wake.",
+                "stderr": f"Session {target_sid} is currently active (not_fully_idle); deferring wake.",
                 "delivered_at": utc_iso(),
             }
+            if resolved_dynamically:
+                busy_out["resolved_session_id"] = target_sid
+            return busy_out
         agy_bin = agent_cfg.get("binary") or shutil.which("agy") or "agy"
         cmd = [str(agy_bin), "--output-format", "json"]
         if agent_cfg.get("dangerously_skip_permissions"):
             cmd.append("--dangerously-skip-permissions")
-        if session_id:
-            cmd.extend(["--conversation", session_id])
+        if target_sid:
+            cmd.extend(["--conversation", target_sid])
         cmd.extend(["-p", prompt])
         if dry_run:
-            return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
+            cli_dry: dict[str, Any] = {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
+            if resolved_dynamically:
+                cli_dry["resolved_session_id"] = target_sid
+            return cli_dry
+        run_cwd = str(cwd) if (cwd and os.path.isdir(str(cwd))) else None
+        res = _run_capture(cmd, cwd=run_cwd, timeout=timeout)
         parsed = _extract_json_dict(res.stdout) or {}
-        discovered_sid = str(parsed.get("conversation_id") or session_id or "").strip() or None
-        return {
+        discovered_sid = str(parsed.get("conversation_id") or target_sid or "").strip() or None
+        cli_res: dict[str, Any] = {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
             "command": cmd,
             "returncode": res.returncode,
             "stdout": res.stdout,
             "stderr": res.stderr,
-            "session_id": discovered_sid,
+            "session_id": None if resolved_dynamically else discovered_sid,
             "delivered_at": utc_iso(),
         }
+        if resolved_dynamically and discovered_sid:
+            cli_res["resolved_session_id"] = discovered_sid
+        return cli_res
 
     if driver == "opencode-http":
         base_url = validate_http_url(str(agent_cfg.get("http_url") or "http://127.0.0.1:4096"))
@@ -508,7 +660,8 @@ def _dispatch_wake_inner(
         cmd.extend(["-p", prompt])
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
+        run_cwd = str(cwd) if (cwd and os.path.isdir(str(cwd))) else None
+        res = _run_capture(cmd, cwd=run_cwd, timeout=timeout)
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,
@@ -528,7 +681,8 @@ def _dispatch_wake_inner(
             cmd = [str(codex_bin), "exec", "--json", "--add-dir", str(mailbox_dir), prompt]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
+        run_cwd = str(cwd) if (cwd and os.path.isdir(str(cwd))) else None
+        res = _run_capture(cmd, cwd=run_cwd, timeout=timeout)
         discovered_sid = _extract_codex_session_id(res.stdout) or session_id
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
@@ -546,7 +700,8 @@ def _dispatch_wake_inner(
         cmd = [str(code_bin), "chat", "-m", "agent", "-r", prompt]
         if dry_run:
             return {"status": "DRY_RUN", "driver": driver, "command": cmd, "delivered_at": utc_iso()}
-        res = _run_capture(cmd, cwd=cwd, timeout=timeout)
+        run_cwd = str(cwd) if (cwd and os.path.isdir(str(cwd))) else None
+        res = _run_capture(cmd, cwd=run_cwd, timeout=timeout)
         return {
             "status": "DELIVERED" if res.returncode == 0 else "FAILED",
             "driver": driver,

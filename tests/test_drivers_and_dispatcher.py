@@ -16,11 +16,13 @@ import pytest
 
 from aim_mailbox.dispatcher import pulse_mailbox, watch_mailbox
 from aim_mailbox.drivers import (
+    _normalize_workspace_key,
     _resolve_agentapi_prefix,
     build_tmux_doorbell,
     build_wake_prompt,
     install_agy_sidecar,
     is_agy_session_idle,
+    resolve_latest_agy_session,
     uninstall_agy_sidecar,
 )
 from aim_mailbox.store import MailboxError, MailboxStore
@@ -845,4 +847,141 @@ def test_priority_lanes_coalesce_key_and_safety_gates(tmp_path: Path) -> None:
     assert len(s_fail["failed"]) == 1
     assert store.list_inbox("flaky", state="done") == []
     assert [m["id"] for m in store.list_inbox("flaky", state="unread")] == [f1["id"], f2["id"]]
+
+
+def test_agy_cwd_auto_session_resolution_across_handoffs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # 1. Cross-OS URI & path normalization (Windows drive, WSL /mnt/<drive>, percent-encoded spaces, POSIX)
+    assert (
+        _normalize_workspace_key("file:///c%3A/Projects/copy-cat")
+        == _normalize_workspace_key(r"C:\Projects\copy-cat\\")
+        == _normalize_workspace_key("/mnt/c/Projects/copy-cat")
+        == "c:/projects/copy-cat"
+    )
+    assert (
+        _normalize_workspace_key("file:///c%3A/Work/My%20App")
+        == _normalize_workspace_key(r"C:\Work\My App")
+        == "c:/work/my app"
+    )
+    assert _normalize_workspace_key("file:///opt/repos/aim-office") == _normalize_workspace_key("/opt/repos/aim-office/")
+
+    # 2. Setup Antigravity conversation_summaries.db with multiple chats, subagent, and killed session
+    summary_db = tmp_path / "conversation_summaries.db"
+    conn = sqlite3.connect(str(summary_db))
+    conn.execute(
+        """
+        CREATE TABLE conversation_summaries (
+            conversation_id TEXT PRIMARY KEY,
+            workspace_uris TEXT NOT NULL,
+            last_modified_time TEXT NOT NULL,
+            status TEXT NOT NULL,
+            not_fully_idle INTEGER NOT NULL,
+            nesting_depth INTEGER NOT NULL DEFAULT 0,
+            killed INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.executemany(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [
+            ("conv-win-1", '["file:///c%3A/Projects/copy-cat"]', "2026-11-26 01:00:00+00:00", "CASCADE_RUN_STATUS_IDLE", 0, 0, 0),
+            ("conv-other", '["file:///c%3A/Projects/other"]', "2026-11-26 03:00:00+00:00", "CASCADE_RUN_STATUS_IDLE", 0, 0, 0),
+            # Newer subagent (nesting_depth=1) and killed session (killed=1) must NEVER be selected
+            ("conv-subagent", '["file:///c%3A/Projects/copy-cat"]', "2026-11-26 04:00:00+00:00", "CASCADE_RUN_STATUS_IDLE", 0, 1, 0),
+            ("conv-killed", '["file:///c%3A/Projects/copy-cat"]', "2026-11-26 05:00:00+00:00", "CASCADE_RUN_STATUS_IDLE", 0, 0, 1),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    assert resolve_latest_agy_session(r"C:\Projects\copy-cat", summary_db=str(summary_db)) == "conv-win-1"
+    assert resolve_latest_agy_session("/mnt/c/Projects/copy-cat", summary_db=str(summary_db)) == "conv-win-1"
+    assert resolve_latest_agy_session(r"C:\Projects\unopened", summary_db=str(summary_db)) is None
+
+    # 3. agy-desktop-sidecar registered with --cwd ONLY (no --session-id) wakes conv-win-1, then follows handoff to conv-win-2
+    sidecar_log = tmp_path / "sidecar_recipients.jsonl"
+    fake_agentapi = _make_fake_cli(
+        tmp_path,
+        "fake_agentapi_cwd",
+        (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            f"Path({str(sidecar_log)!r}).open('a', encoding='utf-8').write(json.dumps(sys.argv[2]) + '\\n')\n"
+            "print(json.dumps({'response': {'sendMessage': {'recipientId': sys.argv[2]}}}))\n"
+        ),
+    )
+    monkeypatch.setenv("ANTIGRAVITY_LS_ADDRESS", "127.0.0.1:55555")
+
+    store = MailboxStore(tmp_path / "mailbox")
+    store.register_agent(
+        "copy-cat",
+        driver="agy-desktop-sidecar",
+        cwd=r"C:\Projects\copy-cat",
+        binary=str(fake_agentapi),
+        summary_db=str(summary_db),
+    )
+    m1 = store.send_envelope(from_agent="lead", to_agent="copy-cat", body="turn 1", ack_required=False, operator_approved=True)
+    s1 = pulse_mailbox(store, agent_id="copy-cat")
+    assert len(s1["dispatched"]) == 1
+    assert s1["dispatched"][0]["result"]["resolved_session_id"] == "conv-win-1"
+    # session_id must remain unpinned in agents.json so future handoffs rotate automatically
+    cfg_after_1 = store.get_agent("copy-cat")
+    assert cfg_after_1 is not None and "session_id" not in cfg_after_1
+    store.ack_message("copy-cat", m1["id"])
+
+    # Simulate /aim-handoff opening a brand-new conversation in C:\Projects\copy-cat
+    conn = sqlite3.connect(str(summary_db))
+    conn.execute(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("conv-win-2", '["file:///c%3A/Projects/copy-cat"]', "2026-11-26 02:30:00+00:00", "CASCADE_RUN_STATUS_IDLE", 0, 0, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    store.send_envelope(from_agent="lead", to_agent="copy-cat", body="turn 2 after handoff", ack_required=False, operator_approved=True)
+    s2 = pulse_mailbox(store, agent_id="copy-cat")
+    assert len(s2["dispatched"]) == 1
+    assert s2["dispatched"][0]["result"]["resolved_session_id"] == "conv-win-2"
+    recipients = [json.loads(ln) for ln in sidecar_log.read_text(encoding="utf-8").splitlines()]
+    assert recipients == ["conv-win-1", "conv-win-2"]
+
+    # 4. agy-cli with --cwd ONLY also dynamically resolves & respects busy state without pinning session_id
+    cli_ws = tmp_path / "cli_proj"
+    cli_ws.mkdir()
+    conn = sqlite3.connect(str(summary_db))
+    conn.execute(
+        "INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("conv-cli-1", json.dumps([cli_ws.resolve().as_uri()]), "2026-11-26 06:00:00+00:00", "CASCADE_RUN_STATUS_RUNNING", 1, 0, 0),
+    )
+    conn.commit()
+    conn.close()
+
+    fake_agy = _make_fake_cli(
+        tmp_path,
+        "fake_agy_cwd",
+        "import json, sys\nprint(json.dumps({'status': 'SUCCESS', 'conversation_id': 'conv-cli-1', 'argv': sys.argv[1:]}))\n",
+    )
+    store.register_agent(
+        "cli-proj",
+        driver="agy-cli",
+        cwd=str(cli_ws),
+        binary=str(fake_agy),
+        summary_db=str(summary_db),
+    )
+    store.send_envelope(from_agent="lead", to_agent="cli-proj", body="cli wake", operator_approved=True)
+    s_cli_busy = pulse_mailbox(store, agent_id="cli-proj")
+    assert len(s_cli_busy["deferred"]) == 1
+
+    conn = sqlite3.connect(str(summary_db))
+    conn.execute("UPDATE conversation_summaries SET status = 'CASCADE_RUN_STATUS_IDLE', not_fully_idle = 0 WHERE conversation_id = 'conv-cli-1'")
+    conn.commit()
+    conn.close()
+
+    s_cli_ok = pulse_mailbox(store, agent_id="cli-proj")
+    assert len(s_cli_ok["dispatched"]) == 1
+    assert "--conversation" in s_cli_ok["dispatched"][0]["result"]["command"]
+    assert "conv-cli-1" in s_cli_ok["dispatched"][0]["result"]["command"]
+    cli_cfg = store.get_agent("cli-proj")
+    assert cli_cfg is not None and "session_id" not in cli_cfg
 

@@ -8,7 +8,7 @@
 [![Platforms: Win11 | WSL2 | Linux | macOS](https://img.shields.io/badge/Platforms-Win11%20%7C%20WSL2%20%7C%20Linux%20%7C%20macOS-blue.svg)](#sharing-one-mailbox-between-native-windows-11-and-wsl2)
 [![A.I.M. Ecosystem](https://img.shields.io/badge/A.I.M.-Ecosystem-00d4ff.svg)](https://github.com/BrianV1981/aim-ecosystem)
 
-`aim-mailbox` (`v0.2.0`) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)**.
+`aim-mailbox` (`v0.2.1`) lets autonomous AI coding agents communicate asynchronously across **Linux, WSL2, macOS, and Native Windows 11** and across heterogeneous harnesses (**Antigravity Desktop/IDE, Antigravity CLI, OpenCode, Grok Build, Codex CLI, VS Code Agent Mode, `tmux`, and custom GUI/CLI tools**) using **pure Python 3.10+ stdlib (`0` pip runtime dependencies, `0` resident database daemons, and `0` idle LLM tokens)**.
 
 ---
 
@@ -134,9 +134,9 @@ export AIM_MAILBOX_DIR="/mnt/c/Users/<YourWindowsUser>/.aim/mailbox"
 
 ### 1. Core Messaging & Wake Loop
 ```bash
-# Register logical agents and wake drivers
+# Register logical agents by project folder (zero session-id updates needed across handoffs!)
 aim-mail register aim-auditor --driver agy-cli --cwd ~/aim-auditor
-aim-mail register copy-cat --driver agy-desktop-sidecar --session-id <conversation-uuid>
+aim-mail register copy-cat --driver agy-desktop-sidecar --cwd "C:\Projects\copy-cat"
 aim-mail register backend-dev --driver opencode-http --http-url http://127.0.0.1:4096
 
 # Send an operator-approved message with a file ref and immediate wake
@@ -214,8 +214,8 @@ aim-mail install-hooks --harness agy --agent aim-auditor --uninstall
 
 | Driver | Target Surface | Session Targeting & Wake Mechanics |
 | :--- | :--- | :--- |
-| `agy-desktop-sidecar` | **Antigravity Desktop / IDE** (Win11, macOS, Linux) | Runs inside an official Antigravity Sidecar (`aim-mail install-agy-sidecar`) and invokes `agentapi send-message <conversation_id> <prompt>` — works even while Desktop is minimized. |
-| `agy-cli` | **Antigravity CLI (`agy`)** (Win11, WSL2, macOS, Linux) | Checks read-only `conversation_summaries.db` (`CASCADE_RUN_STATUS_IDLE`) + `presence/<uuid>.lock`, wakes `agy --conversation <uuid> --output-format json -p <prompt>` (`--dangerously-skip-permissions` is opt-in via `--allow-skip-permissions`), and auto-saves first-run `conversation_id`. |
+| `agy-desktop-sidecar` | **Antigravity Desktop / IDE** (Win11, macOS, Linux) | Runs inside an official Antigravity Sidecar (`aim-mail install-agy-sidecar`), auto-resolves the latest top-level `conversation_id` for `--cwd` from `conversation_summaries.db` across handoffs (or uses explicit `--session-id`), and invokes `agentapi send-message` — works even while Desktop is minimized. |
+| `agy-cli` | **Antigravity CLI (`agy`)** (Win11, WSL2, macOS, Linux) | Auto-resolves the latest top-level `conversation_id` for `--cwd` (or uses explicit `--session-id`), checks read-only `conversation_summaries.db` (`CASCADE_RUN_STATUS_IDLE`) + `presence/<uuid>.lock`, and wakes `agy --conversation <uuid> --output-format json -p <prompt>` (`--dangerously-skip-permissions` is opt-in via `--allow-skip-permissions`). |
 | `opencode-http` | **OpenCode Desktop + CLI** (`opencode serve`) | Sends `POST <http_url>/session/<id>/message` using OpenCode `parts` schema (auto-creating and persisting a session via `POST /session` if unset). |
 | `grok-cli` | **Grok Build (`grok`)** (Win11, WSL2, macOS, Linux) | Wakes `grok --no-auto-update --output-format json [--resume <id>] [--cwd <dir>] -p <prompt>`. |
 | `codex-cli` | **OpenAI Codex CLI** (`codex`) (Win11, WSL2, macOS, Linux) | Wakes `codex exec resume --json <id> <prompt>` (or `codex exec --json --add-dir <mailbox> <prompt>` on first run, auto-saving `thread_id`). |

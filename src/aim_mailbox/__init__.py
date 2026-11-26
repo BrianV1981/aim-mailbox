@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 from .dispatcher import pulse_mailbox, watch_mailbox
 from .drivers import DRIVER_NAMES, install_agy_sidecar, uninstall_agy_sidecar

@@ -1,5 +1,12 @@
 # Memory Log
 
+## [2026-11-25] ingest | Shipped `aim-mailbox` `v0.2.1` (`#17` — Project-Scoped `--cwd` Auto-Session Resolution)
+- Closed `BrianV1981/aim-mailbox#17` and bumped to `v0.2.1`, eliminating `session_id` handoff churn on Antigravity Desktop and CLI:
+  - Added `_normalize_workspace_key()` and `resolve_latest_agy_session()` in `src/aim_mailbox/drivers.py` to match project `--cwd` against `workspace_uris` in read-only `conversation_summaries.db` across Windows (`file:///c%3A/...`, `C:\...`), WSL2 (`/mnt/c/...`), and POSIX (`file:///...`), filtering out subagents (`nesting_depth != 0`) and killed sessions (`killed != 0`).
+  - Updated `agy-desktop-sidecar` and `agy-cli` to resolve the latest workspace conversation dynamically at wake time without permanently pinning `session_id` in `agents.json` (recording `resolved_session_id` on delivery receipts while preserving optional explicit `--session-id` overrides).
+  - Added `--clear-session-id` to `aim-mail register` and `target=auto(cwd)` indicator to `aim-mail agents`.
+  - Verified live WSL2 ↔ Windows 11 Antigravity Desktop Sidecar E2E delivery (`1.17s` wakeup + ACK) across shared `AIM_MAILBOX_DIR`.
+
 ## [2026-11-24] ingest | Shipped `aim-mailbox` `v0.2.0` (`#15`, `#14`, `#13`)
 - Closed `BrianV1981/aim-mailbox#15`, `#14`, and `#13` in isolated `./aim fix` worktrees while keeping `#16` (`events.jsonl`) `On Hold`, `0` runtime pip dependencies, and `15` CLI subcommands (`<= 15`).
 - **`#15` (`45aea39`, `CI` `45530915235` + `gitleaks` `45530915366` green):** Extended `list_inbox()` / `aim-mail inbox` with `--from`, `--thread-id`, `--query`, `--since`, `--limit` and added `gc_mailbox()` / `aim-mail gc` (aging `done/` by `acked_at` and `dead/` by `quarantined_at` with atomic `--archive-dir` confinement and strict `unread/`/`claimed/` protection).

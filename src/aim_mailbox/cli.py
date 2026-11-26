@@ -66,6 +66,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         driver=args.driver,
         cwd=args.cwd,
         session_id=args.session_id,
+        clear_session_id=args.clear_session_id,
         tmux_session=args.tmux_session,
         http_url=args.http_url,
         command=cmd_list,
@@ -92,9 +93,13 @@ def cmd_agents(args: argparse.Namespace) -> int:
         print("No registered agents.")
         return 0
     for aid, cfg in sorted(agents.items()):
-        sid = cfg.get("session_id") or cfg.get("tmux_session") or cfg.get("http_url") or "-"
+        drv = str(cfg.get("driver", "none"))
+        sid = cfg.get("session_id") or cfg.get("tmux_session") or cfg.get("http_url")
+        if not sid and drv in ("agy-desktop-sidecar", "agy-cli") and cfg.get("cwd"):
+            sid = "auto(cwd)"
+        sid = sid or "-"
         cwd = cfg.get("cwd") or "-"
-        print(f"{aid:<22} driver={str(cfg.get('driver', 'none')):<20} target={sid} cwd={cwd}")
+        print(f"{aid:<22} driver={drv:<20} target={sid} cwd={cwd}")
     return 0
 
 
@@ -561,7 +566,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_reg.add_argument("agent", help="Logical agent ID (e.g., aim-auditor)")
     p_reg.add_argument("--driver", choices=DRIVER_NAMES, default=None, help="Last-mile wake driver")
     p_reg.add_argument("--cwd", default=None, help="Agent project working directory")
-    p_reg.add_argument("--session-id", default=None, help="Pinned conversation/session UUID")
+    p_reg.add_argument("--session-id", default=None, help="Optional pinned conversation/session UUID (omit to auto-resolve from --cwd on Antigravity)")
+    p_reg.add_argument("--clear-session-id", action="store_true", help="Clear pinned session_id so Antigravity drivers follow latest session in --cwd")
     p_reg.add_argument("--tmux-session", default=None, help="Target tmux session name (tmux driver)")
     p_reg.add_argument("--http-url", default=None, help="Base HTTP URL (opencode-http driver)")
     p_reg.add_argument("--binary", default=None, help="Optional explicit harness binary path")

@@ -352,6 +352,7 @@ class MailboxStore:
         driver: str | None = None,
         cwd: str | None = None,
         session_id: str | None = None,
+        clear_session_id: bool = False,
         tmux_session: str | None = None,
         http_url: str | None = None,
         command: list[str] | None = None,
@@ -360,6 +361,8 @@ class MailboxStore:
         allow_unapproved: bool | None = None,
         dangerously_skip_permissions: bool | None = None,
     ) -> dict[str, Any]:
+        if clear_session_id and session_id is not None:
+            raise MailboxError("Cannot combine --session-id and --clear-session-id.")
         self.ensure_root()
         aid = validate_agent_id(agent_id)
         self.ensure_agent_box(aid)
@@ -372,7 +375,9 @@ class MailboxStore:
                 entry["driver"] = driver.strip()
             if cwd is not None:
                 entry["cwd"] = cwd
-            if session_id is not None:
+            if clear_session_id:
+                entry.pop("session_id", None)
+            elif session_id is not None:
                 entry["session_id"] = validate_session_id(session_id)
             if tmux_session is not None:
                 entry["tmux_session"] = tmux_session

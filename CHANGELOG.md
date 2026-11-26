@@ -2,6 +2,11 @@
 
 All notable changes to `aim-mailbox` are documented in this file.
 
+## [0.2.1] - 2026-11-25
+
+### Added
+- **Project-Scoped `--cwd` Auto-Session Resolution Across Handoffs (`#17`):** `agy-desktop-sidecar` and `agy-cli` now dynamically resolve the most recently active top-level (`nesting_depth = 0`, `killed = 0`) `conversation_id` matching `--cwd` (`workspace_uris`) from Antigravity's read-only `conversation_summaries.db` across Windows (`file:///c%3A/...`, `C:\...`), WSL2 (`/mnt/c/...`), and POSIX (`file:///...`) without pinning `session_id` in `agents.json`, eliminating manual mailbox updates during `/aim-handoff`. Added `--clear-session-id` on `aim-mail register` and `target=auto(cwd)` display in `aim-mail agents`.
+
 ## [0.2.0] - 2026-11-24
 
 ### Added
